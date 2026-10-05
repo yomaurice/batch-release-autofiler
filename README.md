@@ -96,4 +96,8 @@ the right selectors under `selectors:` in `config.yaml` (see the comments there)
 - The session lives in `browser_profile\` (git-ignored). You're asked to log in again only when the site
   expires it.
 - Nothing is sent in `plan` or `dry-run` mode.
+- The attachments share (S:) is only **read**, never written. Everything the script creates stays in the
+  project folder: `results\`, `browser_profile\` and `test_data\`. Each generated test tree logs its
+  folders in `test_data\<root>\_test_tree_manifest.csv`.
+- To switch from testing to the real share, change `attachments_root` in `config.yaml`. Nothing else changes.
 - A failed row is screenshotted and the run carries on. Check the `results_*.xlsx` workbook at the end.
