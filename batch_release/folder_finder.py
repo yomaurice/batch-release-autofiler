@@ -96,9 +96,9 @@ class AttachmentChoice:
 
 # Pick the files to upload, by the first rule that applies:
 #   1. a MOH_SUB sub-folder        -> every file in it
-#   2. 'OK 3rd P replenish*' file  -> those files + the file(s) named after the batch
-#   3. a 'report-' file            -> those files + every 'COA' file
-#   otherwise the row is flagged for you
+#   2. 'OK 3rd P replenish*' file  -> those files + the file named exactly as the batch
+#   3. a 'report-' file            -> those files + every 'COA' file + the file named exactly as the batch
+#   otherwise the row is flagged for you (also when a rule's batch file or COA is missing)
 def select_attachments(folder: Path, batch: str) -> AttachmentChoice:
     moh_sub = next((d for d in folder.iterdir() if d.is_dir() and d.name.lower() == MOH_SUB_DIR), None)
     if moh_sub is not None:
@@ -109,20 +109,31 @@ def select_attachments(folder: Path, batch: str) -> AttachmentChoice:
 
     files = _files_in(folder)
     names = {p: _norm(p.name) for p in files}
+    batch_files = [p for p in files if is_batch_file(p, batch)]
+    no_batch_file = f"no file named exactly '{batch}' (e.g. {batch}.pdf)"
 
     if any(n.startswith(REPLENISH_PREFIX) for n in names.values()):
-        chosen = [p for p, n in names.items() if REPLENISH_PREFIX in n or name_contains_batch(p.stem, batch)]
-        if not any(name_contains_batch(p.stem, batch) and REPLENISH_PREFIX not in names[p] for p in chosen):
-            return AttachmentChoice(chosen, "OK 3rd P replenish", f"no file named after batch '{batch}'")
-        return AttachmentChoice(chosen, "OK 3rd P replenish")
+        chosen = _unique([p for p, n in names.items() if REPLENISH_PREFIX in n] + batch_files)
+        return AttachmentChoice(chosen, "OK 3rd P replenish", "" if batch_files else no_batch_file)
 
     if any(REPORT_MARK in n for n in names.values()):
-        chosen = [p for p, n in names.items() if REPORT_MARK in n or COA_MARK in n]
-        if not any(COA_MARK in names[p] for p in chosen):
-            return AttachmentChoice(chosen, "report- + COA", "no COA file found")
-        return AttachmentChoice(chosen, "report- + COA")
+        coa = [p for p, n in names.items() if COA_MARK in n]
+        chosen = _unique([p for p, n in names.items() if REPORT_MARK in n] + coa + batch_files)
+        problem = "; ".join(m for m, missing in (("no COA file found", not coa), (no_batch_file, not batch_files))
+                            if missing)
+        return AttachmentChoice(chosen, "report- + COA + batch", problem)
 
     return AttachmentChoice([], "", "no MOH_SUB folder, 'OK 3rd P replenish' file or 'report-' file")
+
+
+# A file whose name (without extension) is exactly the batch number, e.g. '44216.pdf'
+def is_batch_file(path: Path, batch: str) -> bool:
+    return _norm(path.stem) == batch.strip().lower()
+
+
+# Keep order, drop repeats (a file can satisfy two conditions)
+def _unique(paths: list[Path]) -> list[Path]:
+    return list(dict.fromkeys(paths))
 
 
 # Regular files directly in a folder, skipping Office lock files

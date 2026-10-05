@@ -64,7 +64,8 @@ def test_moh_sub_wins(tmp_path: Path) -> None:
 
 
 def test_replenish_plus_batch_file(tmp_path: Path) -> None:
-    _files(tmp_path, "OK 3rd P replenish 1.pdf", "x OK 3rd P replenish 2.pdf", "44216.pdf", "COA.pdf", "report-x.pdf")
+    _files(tmp_path, "OK 3rd P replenish 1.pdf", "x OK 3rd P replenish 2.pdf", "44216.pdf", "44216 old.pdf",
+           "COA.pdf", "report-x.pdf")
     c = select_attachments(tmp_path, "44216")
     assert c.rule == "OK 3rd P replenish" and not c.problem
     assert sorted(p.name for p in c.files) == ["44216.pdf", "OK 3rd P replenish 1.pdf", "x OK 3rd P replenish 2.pdf"]
@@ -72,13 +73,25 @@ def test_replenish_plus_batch_file(tmp_path: Path) -> None:
 
 def test_replenish_without_batch_file_is_flagged(tmp_path: Path) -> None:
     _files(tmp_path, "OK 3rd P replenish 1.pdf")
-    assert "no file named after batch" in select_attachments(tmp_path, "44216").problem
+    assert "no file named exactly" in select_attachments(tmp_path, "44216").problem
 
 
-def test_report_plus_coa(tmp_path: Path) -> None:
-    _files(tmp_path, "report-44216.pdf", "COA 44216.pdf", "checklist.pdf")
+def test_report_plus_coa_plus_batch_file(tmp_path: Path) -> None:
+    _files(tmp_path, "report-44216.pdf", "COA 44216.pdf", "44216.pdf", "44216 notes.pdf", "checklist.pdf")
     c = select_attachments(tmp_path, "44216")
-    assert c.rule == "report- + COA" and sorted(p.name for p in c.files) == ["COA 44216.pdf", "report-44216.pdf"]
+    assert c.rule == "report- + COA + batch" and not c.problem
+    assert sorted(p.name for p in c.files) == ["44216.pdf", "COA 44216.pdf", "report-44216.pdf"]
+
+
+def test_report_without_batch_file_is_flagged(tmp_path: Path) -> None:
+    _files(tmp_path, "report-44216.pdf", "COA 44216.pdf")
+    assert "no file named exactly" in select_attachments(tmp_path, "44216").problem
+
+
+def test_coa_alone_is_not_uploaded(tmp_path: Path) -> None:
+    _files(tmp_path, "COA 44216.pdf", "44216.pdf")
+    c = select_attachments(tmp_path, "44216")
+    assert c.files == [] and c.problem
 
 
 def test_nothing_matches_is_flagged(tmp_path: Path) -> None:

@@ -1,7 +1,6 @@
 """Command-line entry point: plan / submit / inspect."""
 import argparse
 import sys
-import time
 from pathlib import Path
 
 from batch_release.config import PROJECT_ROOT, load_settings
@@ -28,7 +27,8 @@ def cmd_plan(args: argparse.Namespace) -> list:
 
 # Build the plan, then fill (and depending on mode, send) every READY request
 def cmd_submit(args: argparse.Namespace) -> None:
-    from batch_release.portal import Portal  # Playwright is only needed for this command
+    from batch_release.portal import ConsolePrompts  # Playwright is only needed for this command
+    from batch_release.runner import file_requests
 
     settings = load_settings(args.config)
     plan = cmd_plan(args)
@@ -44,13 +44,12 @@ def cmd_submit(args: argparse.Namespace) -> None:
         print("Cancelled.")
         return
 
-    with Portal(settings) as portal:
-        portal.wait_for_login()
-        for n, req in enumerate(ready, 1):
-            print(f"[{n}/{len(ready)}] row {req.excel_row}  batch {req.batch}  {req.product}")
-            portal.file_request(req, args.mode, args.excel.name)
-            print(f"        -> {req.status}  {req.message}")
-            time.sleep(args.pause)
+    file_requests(
+        settings, ready, args.mode, args.excel.name, ConsolePrompts(),
+        on_start=lambda n, r: print(f"[{n}/{len(ready)}] row {r.excel_row}  batch {r.batch}  {r.product}"),
+        on_done=lambda n, r: print(f"        -> {r.status}  {r.message}"),
+        pause_s=args.pause,
+    )
 
     path = write_report(settings.results_dir, plan, f"results_{args.mode}")
     print(f"\nDone. Results written to: {path}")

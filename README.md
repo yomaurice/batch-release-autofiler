@@ -31,13 +31,18 @@ still isn't unique, the row is marked `NEEDS_ATTENTION` and the candidates are l
 
 **Which files are uploaded.** The first rule that applies wins:
 
-1. The folder has a `MOH_SUB` sub-folder → every file inside `MOH_SUB`.
-2. A file whose name starts with `OK 3rd P replenish` exists → every file containing that phrase, plus
-   the file(s) named after the batch.
-3. A file containing `report-` exists → every file containing `report-`, plus every file containing `COA`.
-4. None of the above → the row is flagged `NEEDS_ATTENTION`.
+1. The folder has a `MOH_SUB` sub-folder → every file inside `MOH_SUB` (nothing outside it).
+2. A file whose name starts with `OK 3rd P replenish` exists → every file containing that phrase, plus the
+   file named **exactly** as the batch (e.g. `44216.pdf`).
+3. A file containing `report-` exists → every file containing `report-`, plus every file containing
+   `COA`, plus the file named **exactly** as the batch.
+4. None of the above → the row is flagged `NEEDS_ATTENTION`. A COA alone is never uploaded.
 
-Rule 2 without a batch-named file, and rule 3 without a COA, are also flagged. Matching ignores case.
+A rule whose batch file (or, for rule 3, COA) is missing is also flagged. Matching ignores case.
+
+**After a real send**, the confirmation page (with its request number) is screenshotted into
+`results\screenshots\`, and a copy is saved **into the batch's own folder** as
+`MOH confirmation <batch> <number>.png`. Dry runs never do this.
 
 ## Setup (once)
 
@@ -51,23 +56,27 @@ copy config.example.yaml config.yaml
 Edit `config.yaml`: map each SAP username to its folder under `users`, and set `attachments_root`. The script uses your
 installed Chrome (`browser_channel: chrome`), so `playwright install` isn't needed.
 
-## Monthly use
+## Monthly use — the app
+
+Double-click **`start.bat`**. The first time, it sets up Python packages, which takes a minute.
+
+1. **Browse…** to the month's SAP export. It is checked straight away: every row for your users is shown,
+   colour-coded **Ready** / **Needs attention** / **Skipped**, with the files that will be uploaded and
+   the reason for anything not ready. Double-click a row to open its folder.
+2. Pick a **mode**: *Dry run* (fill only, never send), *Ask me before each send*, or *Send all
+   automatically*.
+3. **Start**. This files every Ready row, or only the rows you selected (Ctrl/Shift-click). Chrome opens.
+   Log in with 2FA, then click **I'm logged in** in the yellow banner. In *ask* mode the banner shows
+   **Send it / Don't send** for each filled form. **Stop** finishes the current request and stops.
+
+Every check and run is saved as an Excel file in `results\` (**Open results folder**).
+
+### Command line (same engine)
 
 ```bat
-:: 1. Check everything without opening the browser — writes results\plan_*.xlsx
-.venv\Scripts\python run.py plan "C:\Users\...\Downloads\05.10.26.XLSX"
-
-:: 2. Fill the forms but DON'T send (screenshots in results\screenshots)
-.venv\Scripts\python run.py submit "...\05.10.26.XLSX" --mode dry-run
-
-:: 3. Send, asking y/N before each request
-.venv\Scripts\python run.py submit "...\05.10.26.XLSX" --mode confirm
-
-:: 4. Send all without asking (you must type SEND)
-.venv\Scripts\python run.py submit "...\05.10.26.XLSX" --mode auto
+.venv\Scripts\python run.py plan   "....10.26.XLSX"
+.venv\Scripts\python run.py submit "....10.26.XLSX" --mode dry-run|confirm|auto [--limit 1] [--rows 4 7]
 ```
-
-Useful flags: `--limit 1` to process one request only, and `--rows 4 7` for specific Excel rows.
 
 ## Testing without the real share
 
@@ -96,8 +105,8 @@ the right selectors under `selectors:` in `config.yaml` (see the comments there)
 - Each run opens a fresh browser session, so you log in (with 2FA) at the start of every run. Old
   session cookies made the MOH login gateway hang.
 - Nothing is sent in `plan` or `dry-run` mode.
-- The attachments share (S:) is only **read**, never written. Everything the script creates stays in the
-  project folder: `results\` and `test_data\`. Each generated test tree logs its
-  folders in `test_data\<root>\_test_tree_manifest.csv`.
+- On the attachments share (S:), the only thing ever written is the confirmation screenshot, saved into a
+  batch folder after a real send. Everything else stays in the project folder (`results\`, `test_data\`).
+  Each generated test tree logs its folders in `test_data\<root>\_test_tree_manifest.csv`.
 - To switch from testing to the real share, change `attachments_root` in `config.yaml`. Nothing else changes.
 - A failed row is screenshotted and the run carries on. Check the `results_*.xlsx` workbook at the end.

@@ -1,9 +1,11 @@
 """Browser automation of the MOH batch-release form (Playwright, your own logged-in session)."""
 import json
 import re
+import shutil
 import time
 from datetime import date, datetime
 from pathlib import Path
+from typing import Protocol
 
 from playwright.sync_api import BrowserContext, Locator, Page, sync_playwright
 
@@ -32,11 +34,36 @@ FAILED = "FAILED"
 DECLINED = "NOT SENT (you declined)"
 
 
+class Prompts(Protocol):
+    """How the portal talks to you: the terminal (ConsolePrompts) or the desktop UI."""
+
+    # Block until you say you are logged in; 'retry' is True after a failed attempt
+    def wait_for_login(self, retry: bool) -> None: ...
+
+    # Ask whether to send the filled form for this request
+    def confirm_send(self, req: Request) -> bool: ...
+
+
+class ConsolePrompts:
+    """Terminal version of the prompts, used by run.py."""
+
+    def wait_for_login(self, retry: bool) -> None:
+        if retry:
+            print("    Could not open the form yet (still logging in, or selectors need calibrating — see README).")
+        else:
+            print("\n>>> Log in in the browser window (password + 2FA).")
+        input(">>> Press Enter here once you see the submitted-batches list... ")
+
+    def confirm_send(self, req: Request) -> bool:
+        return input(f">>> Send request for batch {req.batch} ({req.product})? [y/N] ").strip().lower() in ("y", "yes")
+
+
 class Portal:
     """Owns the browser window; you log in yourself, then it fills one form per request."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, prompts: Prompts | None = None) -> None:
         self.settings = settings
+        self.prompts: Prompts = prompts or ConsolePrompts()
         self.selectors = {**DEFAULT_SELECTORS, **settings.selectors}
         self.shots_dir = settings.results_dir / "screenshots"
         self._pw = None
@@ -67,15 +94,14 @@ class Portal:
     def wait_for_login(self) -> None:
         page = self._page()
         page.goto(self.settings.portal_url)
-        print("\n>>> Log in in the browser window (password + 2FA).")
+        retry = False
         while True:
-            input(">>> Press Enter here once you see the submitted-batches list... ")
+            self.prompts.wait_for_login(retry)
             if "qpbatchrelease" in page.url and "/batch-release" not in page.url:
                 page.goto(self.settings.portal_url)  # login sometimes lands on the site root
             if self._open_form(timeout_ms=8000):
-                print(">>> Form opened, starting.\n")
                 return
-            print("    Could not open the form yet (still logging in, or selectors need calibrating — see README).")
+            retry = True
 
     # Fill the form for one request; send it only if mode allows
     def file_request(self, req: Request, mode: str, excel_name: str) -> None:
@@ -99,17 +125,16 @@ class Portal:
             if mode == "dry-run":
                 req.status, req.message = FILLED, f"dry run, screenshot: {shot.name}"
                 return
-            if mode == "confirm" and not _ask_yes(f"Send request for batch {req.batch} ({req.product})?"):
+            if mode == "confirm" and not self.prompts.confirm_send(req):
                 req.status, req.message = DECLINED, f"screenshot: {shot.name}"
                 return
 
             self._locate(self.selectors["submit_button"]).first.click()
-            page.wait_for_load_state("networkidle")
-            time.sleep(1.5)
-            done = self._screenshot(req, "sent")
-            reference = _find_reference(page.inner_text("body"))
-            req.status, req.message = FILED, f"reference: {reference or '?'}, screenshot: {done.name}"
+            reference = self._wait_for_confirmation()
+            done = self._screenshot(req, "sent", full_page=False)  # viewport shot keeps the confirmation popup in view
             append_ledger(self.settings.results_dir, req, excel_name, reference)
+            saved = self._save_confirmation_to_folder(req, done, reference)
+            req.status, req.message = FILED, f"reference: {reference or '?'}, {saved}"
         except Exception as exc:  # one bad row must not stop the whole batch
             shot = self._screenshot(req, "error")
             first_line = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
@@ -206,20 +231,39 @@ class Portal:
             if not page.get_by_text(path.name, exact=False).count():
                 time.sleep(1.0)  # give slow uploads a moment before the next file
 
-    def _screenshot(self, req: Request, tag: str) -> Path:
+    # After 'send', wait for the confirmation (with its request number) to appear; returns the number if found
+    def _wait_for_confirmation(self, timeout_s: float = 20.0) -> str:
+        page = self._page()
+        page.wait_for_load_state("networkidle")
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            reference = _find_reference(page.inner_text("body"))
+            if reference:
+                return reference
+            time.sleep(0.5)
+        return ""
+
+    # Copy the confirmation screenshot into the batch's own attachment folder (only after a real send)
+    def _save_confirmation_to_folder(self, req: Request, shot: Path, reference: str) -> str:
+        if req.folder is None:
+            return f"screenshot: {shot.name}"
+        stamp = reference or datetime.now().strftime("%d.%m.%Y %H%M")
+        target = req.folder / f"MOH confirmation {req.batch} {stamp}.png"
+        try:
+            shutil.copy2(shot, target)
+            return f"confirmation saved to batch folder: {target.name}"
+        except OSError as exc:
+            return f"could not save confirmation to batch folder ({exc}); copy is in results: {shot.name}"
+
+    def _screenshot(self, req: Request, tag: str, full_page: bool = True) -> Path:
         self.shots_dir.mkdir(parents=True, exist_ok=True)
         safe_batch = re.sub(r"[^A-Za-z0-9._-]", "_", req.batch)
         path = self.shots_dir / f"{datetime.now():%Y%m%d_%H%M%S}_row{req.excel_row}_{safe_batch}_{tag}.png"
         try:
-            self._page().screenshot(path=str(path), full_page=True)
+            self._page().screenshot(path=str(path), full_page=full_page)
         except Exception:
             pass
         return path
-
-
-# Console yes/no prompt for confirm mode
-def _ask_yes(question: str) -> bool:
-    return input(f">>> {question} [y/N] ").strip().lower() in ("y", "yes")
 
 
 # Best-effort grab of the request/reference number shown after sending

@@ -20,9 +20,9 @@ _BAD_CHARS = re.compile(r'[\\/:*?"<>|]')
 
 # File sets per scenario; rows cycle through them so every attachment rule is exercised
 _SCENARIOS: list[tuple[str, list[str]]] = [
-    ("moh_sub", ["MOH_SUB/COA {batch}.pdf", "MOH_SUB/Release letter {batch}.pdf", "internal notes.pdf"]),
+    ("moh_sub", ["MOH_SUB/MOH package 1.pdf", "MOH_SUB/MOH package 2.pdf", "COA {batch}.pdf", "internal notes.pdf"]),
     ("replenish", ["OK 3rd P replenish {batch}.pdf", "OK 3rd P replenish annex.pdf", "{batch}.pdf", "other.pdf"]),
-    ("report", ["report-{batch}.pdf", "COA {batch}.pdf", "COA supplier.pdf", "checklist.pdf"]),
+    ("report", ["report-{batch}.pdf", "COA {batch}.pdf", "{batch}.pdf", "{batch} draft.pdf", "checklist.pdf"]),
     ("nothing", ["checklist.pdf", "scan001.pdf"]),
 ]
 
