@@ -12,8 +12,8 @@ folder_search_depth: 3          # folder levels searched below each user's folde
 # Value = that user's sub-folder under attachments_root (leave empty to search the whole root).
 users:
   DSABAG01: Dudi
-  EBISMUTH: ""       # TODO: folder name
-  GSHETRIT: ""       # TODO: folder name
+  EBISMUTH: Esther
+  GSHETRIT: Gil
 
 # Date format typed into the portal's date fields
 portal_date_format: "%d/%m/%Y"
