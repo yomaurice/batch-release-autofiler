@@ -17,14 +17,17 @@ per Excel row, attaches that batch's documents and, depending on the mode, sends
 | צרופות | files from the batch folder, chosen by the rules below |
 | הצהרה checkbox | ticked |
 
-Rows are filed only when `Usage dec. made by` is one of the `users` in `config.yaml`.
+**One person per run (guard).** You choose who is filing ("Filing as"), and only rows whose
+`Usage dec. made by` is that person are loaded, so Esther can't file Gil's batches. After login the app
+also reads the portal greeting (`שלום, <name>`). If it doesn't match that person's `portal_name` in
+`config.yaml`, the run is blocked before anything is filled.
 
 **Skipped:** blank or totals rows, non-IL licenses, duplicates of an earlier row (same batch + license +
 lot date), and anything already filed in a previous run (`results/filed_ledger.csv`).
 
 **Attachment folder:** searched only inside the user's own folder:
 `attachments_root\<user folder>\`. The folder is mapped from the `Usage dec. made by` value under
-`users` in `config.yaml`, e.g. `DSABAG01: Dudi`. Folders look like
+`users` in `config.yaml` (`folder: Dudi`). Folders look like
 `ABITREN TEVA 75MG_3ML 10 AMP 44216 25.05.2026 1802347455 ...`, and the batch must appear in the name
 as a whole word. If several folders match, the one carrying the **Lot created on** date wins. If that
 still isn't unique, the row is marked `NEEDS_ATTENTION` and the candidates are listed.
@@ -53,20 +56,28 @@ py -m venv .venv
 copy config.example.yaml config.yaml
 ```
 
-Edit `config.yaml`: map each SAP username to its folder under `users`, and set `attachments_root`. The script uses your
+Edit `config.yaml`: set `attachments_root`, and under `users` give each SAP user their `folder` and
+`portal_name` (their name exactly as in the portal's `שלום, ...` greeting). The script uses your
 installed Chrome (`browser_channel: chrome`), so `playwright install` isn't needed.
+
+**Login details (optional, once per person).** In the app, choose your name and click **Login details**.
+Your portal username and password are saved encrypted in **Windows Credential Manager**, for your Windows
+account only, never in a file. Each run then fills them on the MOH login page, and you type only the
+code from your phone.
 
 ## Monthly use — the app
 
 Double-click **`start.bat`**. The first time, it sets up Python packages, which takes a minute.
 
-1. **Browse…** to the month's SAP export. It is checked straight away: every row for your users is shown,
+0. Pick your name under **Filing as** (top right).
+1. **Browse…** to the month's SAP export. It is checked straight away: every one of your rows is shown,
    colour-coded **Ready** / **Needs attention** / **Skipped**, with the files that will be uploaded and
    the reason for anything not ready. Double-click a row to open its folder.
 2. Pick a **mode**: *Dry run* (fill only, never send), *Ask me before each send*, or *Send all
    automatically*.
 3. **Start**. This files every Ready row, or only the rows you selected (Ctrl/Shift-click). Chrome opens.
-   Log in with 2FA, then click **I'm logged in** in the yellow banner. In *ask* mode the banner shows
+   Your username and password are filled in if saved. Type the 2FA code, then click **I'm logged in** in
+   the yellow banner. In *ask* mode the banner shows
    **Send it / Don't send** for each filled form. **Stop** finishes the current request and stops.
 
 Every check and run is saved as an Excel file in `results\` (**Open results folder**).

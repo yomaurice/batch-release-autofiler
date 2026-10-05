@@ -9,32 +9,48 @@ from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
 
-from batch_release.config import PROJECT_ROOT, Settings, load_settings
+from batch_release.config import PROJECT_ROOT, Settings, UserProfile, load_settings
+from batch_release.credentials import delete_login, get_login, save_login
 from batch_release.planner import NEEDS_ATTENTION, READY, SKIPPED, Request, build_plan
 from batch_release.report import load_ledger, summarize, write_report
 
 CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 
-MODES = {
-    "Dry run (fill only, never send)": "dry-run",
-    "Ask me before each send": "confirm",
-    "Send all automatically": "auto",
+# Design tokens
+BG = "#f4f6fb"
+CARD = "#ffffff"
+BORDER = "#e6e8ef"
+TEXT = "#0f172a"
+MUTED = "#64748b"
+HEADER = "#111827"
+ACCENT = "#4f46e5"
+ACCENT_HOVER = "#4338ca"
+GHOST = "#eef0f6"
+GHOST_HOVER = "#e2e5ee"
+FONT = "Segoe UI"
+
+MODES = {"Dry run": "dry-run", "Ask before each send": "confirm", "Send all": "auto"}
+MODE_HINTS = {
+    "dry-run": "Fills every form in Chrome but never presses Send.",
+    "confirm": "Fills each form, then waits for you to click Send it / Don't send.",
+    "auto": "Sends every ready request without asking. You confirm once before it starts.",
 }
 
-# Row colours in the table, per status
+# status -> (label, text colour, row tint)
 STATUS_STYLE = {
-    READY: ("#e8f5e9", "Ready"),
-    NEEDS_ATTENTION: ("#fff3e0", "Needs attention"),
-    SKIPPED: ("#f2f2f2", "Skipped"),
-    "FILLED (not sent)": ("#e3f2fd", "Filled (dry run)"),
-    "FILED": ("#c8e6c9", "Sent ✓"),
-    "FAILED": ("#ffebee", "Failed"),
-    "NOT SENT (you declined)": ("#f2f2f2", "Not sent"),
+    READY: ("Ready", "#15803d", "#f0fdf4"),
+    NEEDS_ATTENTION: ("Needs attention", "#b45309", "#fffbeb"),
+    SKIPPED: ("Skipped", "#64748b", "#f8fafc"),
+    "FILLED (not sent)": ("Filled (dry run)", "#1d4ed8", "#eff6ff"),
+    "FILED": ("Sent", "#047857", "#d1fae5"),
+    "FAILED": ("Failed", "#b91c1c", "#fef2f2"),
+    "NOT SENT (you declined)": ("Not sent", "#64748b", "#f8fafc"),
 }
+STAT_TILES = [READY, NEEDS_ATTENTION, SKIPPED, "FILED", "FAILED"]
 
-COLUMNS = [("row", "Row", 50), ("status", "Status", 120), ("batch", "Batch", 110), ("product", "Product", 230),
-           ("license", "License", 120), ("user", "User", 90), ("lot", "Lot created", 90),
-           ("files", "Files to upload", 260), ("message", "Notes", 420)]
+COLUMNS = [("row", "ROW", 56), ("status", "STATUS", 140), ("batch", "BATCH", 120), ("product", "PRODUCT", 240),
+           ("license", "LICENSE", 130), ("lot", "LOT CREATED", 100), ("files", "FILES TO UPLOAD", 300),
+           ("message", "NOTES", 420)]
 
 
 class StopRequested(Exception):
@@ -54,9 +70,9 @@ class GuiPrompts:
         self._answer = value
         self._event.set()
 
-    def _ask(self, text: str, buttons: list[tuple[str, str]]) -> str:
+    def _ask(self, title: str, text: str, buttons: list[tuple[str, str]]) -> str:
         self._event.clear()
-        self.app.call(lambda: self.app.show_banner(text, buttons))
+        self.app.call(lambda: self.app.show_banner(title, text, buttons))
         while not self._event.wait(0.2):
             if self.app.stop_requested.is_set():
                 self.app.call(self.app.hide_banner)
@@ -65,29 +81,88 @@ class GuiPrompts:
         return self._answer or ""
 
     def wait_for_login(self, retry: bool) -> None:
-        text = ("The form could not be opened yet. Finish logging in and wait for the submitted-batches list, "
-                "then click again." if retry else
-                "Log in in the Chrome window (password + 2FA). When you see the submitted-batches list, click:")
-        self._ask(text, [("I'm logged in", "ok")])
+        if retry:
+            self._ask("Not logged in yet",
+                      "Finish logging in and wait for the submitted-batches list, then click again.",
+                      [("I'm logged in", "ok")])
+        elif self.app.login_saved:
+            self._ask("Enter the code from your phone",
+                      "Your username and password were filled in Chrome. Type the 2FA code there, wait for the "
+                      "submitted-batches list, then click:", [("I'm logged in", "ok")])
+        else:
+            self._ask("Log in to the MOH portal",
+                      "Log in in the Chrome window (password + 2FA). When you see the submitted-batches list, "
+                      "click:", [("I'm logged in", "ok")])
 
     def confirm_send(self, req: Request) -> bool:
-        text = f"Batch {req.batch} — {req.product} is filled in Chrome. Check it, then:"
-        return self._ask(text, [("Send it", "send"), ("Don't send", "skip")]) == "send"
+        return self._ask(f"Send batch {req.batch}?",
+                         f"{req.product} is filled in Chrome with {len(req.files)} attachment(s). Check it, then:",
+                         [("Send it", "send"), ("Don't send", "skip")]) == "send"
+
+
+class LoginDialog(ctk.CTkToplevel):
+    """Enter / replace / remove the saved portal login of one person."""
+
+    def __init__(self, master: "App", profile: UserProfile) -> None:
+        super().__init__(master, fg_color=CARD)
+        self.profile = profile
+        self.saved = False
+        self.title("Portal login")
+        self.geometry("460x430")
+        self.resizable(False, False)
+        self.transient(master)
+
+        ctk.CTkLabel(self, text=f"Portal login — {profile.display_name or profile.sap_user}",
+                     font=(FONT, 18, "bold"), text_color=TEXT).pack(anchor="w", padx=24, pady=(22, 2))
+        ctk.CTkLabel(self, text="Saved encrypted in Windows Credential Manager, for your Windows account only. "
+                                "You still type the code from your phone.",
+                     font=(FONT, 12), text_color=MUTED, justify="left", wraplength=400).pack(anchor="w", padx=24)
+        existing = get_login(profile.sap_user)
+        _field_label(self, "ID / username").pack(anchor="w", padx=26, pady=(18, 4))
+        self.user = _entry(self, "ת.ז / שם משתמש")
+        self.user.pack(fill="x", padx=24)
+        if existing:
+            self.user.insert(0, existing.username)
+        _field_label(self, "Password").pack(anchor="w", padx=26, pady=(12, 4))
+        self.pwd = _entry(self, "Type to replace the saved password" if existing else "Password", show="•")
+        self.pwd.pack(fill="x", padx=24)
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=24, pady=22)
+        _button(row, "Save", self._save, primary=True, width=110).pack(side="right")
+        _button(row, "Cancel", self.destroy, width=90).pack(side="right", padx=8)
+        if existing:
+            _button(row, "Remove saved login", self._remove, width=150, danger=True).pack(side="left")
+        self.after(150, lambda: (self.grab_set(), self.pwd.focus() if existing else self.user.focus()))
+
+    def _save(self) -> None:
+        if not self.user.get().strip() or not self.pwd.get():
+            messagebox.showwarning("Missing", "Enter both username and password.", parent=self)
+            return
+        save_login(self.profile.sap_user, self.user.get(), self.pwd.get())
+        self.saved = True
+        self.destroy()
+
+    def _remove(self) -> None:
+        delete_login(self.profile.sap_user)
+        self.saved = True
+        self.destroy()
 
 
 class App(ctk.CTk):
-    """Main window: pick the SAP export, check it, then fill/send the requests."""
+    """Main window: choose who files, pick the SAP export, check it, then fill/send the requests."""
 
     def __init__(self) -> None:
-        super().__init__()
         ctk.set_appearance_mode("light")
-        ctk.set_default_color_theme("blue")
-        self.title("Batch Release Autofiler — MOH")
-        self.geometry("1400x860")
-        self.minsize(1100, 650)
+        super().__init__(fg_color=BG)
+        self.title("Batch Release — MOH filing")
+        self.geometry("1440x900")
+        self.minsize(1150, 700)
         self.after(0, lambda: self.state("zoomed"))  # open maximized, whatever the screen size/scaling
 
         self.settings: Settings | None = None
+        self.profile: UserProfile | None = None
+        self.login_saved = False
         self.excel_path: Path | None = None
         self.plan: list[Request] = []
         self.busy = False
@@ -95,6 +170,7 @@ class App(ctk.CTk):
         self.prompts = GuiPrompts(self)
         self._ui_queue: "queue.Queue[Callable[[], None]]" = queue.Queue()
 
+        self._style_table()
         self._build()
         self._load_config()
         self.after(100, self._drain_queue)
@@ -102,97 +178,161 @@ class App(ctk.CTk):
     # ---------- layout ----------
 
     def _build(self) -> None:
-        bold = ctk.CTkFont(size=14, weight="bold")
+        # Header bar
+        header = ctk.CTkFrame(self, fg_color=HEADER, corner_radius=0, height=64)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        brand = ctk.CTkFrame(header, fg_color="transparent")
+        brand.pack(side="left", padx=28)
+        ctk.CTkLabel(brand, text="Batch Release", font=(FONT, 20, "bold"), text_color="white").pack(anchor="w",
+                                                                                                   pady=(9, 0))
+        ctk.CTkLabel(brand, text="MOH batch-release filing from the SAP export", font=(FONT, 12),
+                     text_color="#9ca3af").pack(anchor="w")
 
-        top = ctk.CTkFrame(self, fg_color="transparent")
-        top.pack(fill="x", padx=16, pady=(14, 6))
-        ctk.CTkLabel(top, text="1. SAP export", font=bold).pack(side="left")
-        self.excel_entry = ctk.CTkEntry(top, width=620, placeholder_text="Choose the monthly .XLSX export…")
-        self.excel_entry.pack(side="left", padx=10)
-        ctk.CTkButton(top, text="Browse…", width=90, command=self._browse).pack(side="left")
-        self.check_btn = ctk.CTkButton(top, text="Check file", width=120, command=self._start_plan)
-        self.check_btn.pack(side="left", padx=10)
-        ctk.CTkButton(top, text="Edit settings", width=110, fg_color="gray60", hover_color="gray45",
-                      command=lambda: _open(CONFIG_PATH)).pack(side="right")
+        right = ctk.CTkFrame(header, fg_color="transparent")
+        right.pack(side="right", padx=24)
+        _button(right, "⚙  Settings", lambda: _open(CONFIG_PATH), width=110, dark=True).pack(side="right")
+        _button(right, "Login details", self._edit_login, width=120, dark=True).pack(side="right", padx=8)
+        self.login_badge = ctk.CTkLabel(right, text="", font=(FONT, 12), corner_radius=12, height=26, padx=10)
+        self.login_badge.pack(side="right", padx=8)
+        self.profile_menu = ctk.CTkOptionMenu(right, values=["—"], command=self._on_profile, width=200, height=36,
+                                              font=(FONT, 13, "bold"), fg_color="#1f2937", button_color="#374151",
+                                              button_hover_color="#4b5563", dropdown_font=(FONT, 13),
+                                              corner_radius=10)
+        self.profile_menu.pack(side="right", padx=8)
+        ctk.CTkLabel(right, text="Filing as", font=(FONT, 12), text_color="#9ca3af").pack(side="right")
 
-        self.info_label = ctk.CTkLabel(self, text="", anchor="w", text_color="gray30")
-        self.info_label.pack(fill="x", padx=18)
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=24, pady=14)
 
-        chips = ctk.CTkFrame(self, fg_color="transparent")
-        chips.pack(fill="x", padx=16, pady=(8, 4))
-        self.chip_labels: dict[str, ctk.CTkLabel] = {}
-        for status in (READY, NEEDS_ATTENTION, SKIPPED, "FILED", "FAILED"):
-            color, title = STATUS_STYLE[status]
-            lbl = ctk.CTkLabel(chips, text=f"{title}: 0", fg_color=color, corner_radius=8, padx=12, height=28)
-            lbl.pack(side="left", padx=(0, 8))
-            self.chip_labels[status] = lbl
-        self.filter = ctk.CTkSegmentedButton(chips, values=["To file + attention", "Everything"],
+        # Step 1 — the SAP export
+        file_card = _card(body)
+        file_card.pack(fill="x")
+        row = ctk.CTkFrame(file_card, fg_color="transparent")
+        row.pack(fill="x", padx=20, pady=(14, 0))
+        _step(row, "1", "SAP export").pack(side="left", padx=(0, 16))
+        self.excel_entry = _entry(row, "Choose the month's .XLSX export…")
+        self.excel_entry.pack(side="left", fill="x", expand=True)
+        _button(row, "Browse…", self._browse, width=110).pack(side="left", padx=10)
+        self.check_btn = _button(row, "Check file", self._start_plan, primary=True, width=130)
+        self.check_btn.pack(side="left")
+        self.info_label = ctk.CTkLabel(file_card, text="", font=(FONT, 12), text_color=MUTED, anchor="w")
+        self.info_label.pack(fill="x", padx=22, pady=(6, 10))
+
+        # Stat tiles + filter
+        stats = ctk.CTkFrame(body, fg_color="transparent")
+        stats.pack(fill="x", pady=(12, 0))
+        self.stat_values: dict[str, ctk.CTkLabel] = {}
+        for status in STAT_TILES:
+            label, colour, _ = STATUS_STYLE[status]
+            tile = _card(stats)
+            tile.pack(side="left", padx=(0, 12))
+            value = ctk.CTkLabel(tile, text="0", font=(FONT, 22, "bold"), text_color=colour)
+            value.pack(side="left", padx=(16, 8), pady=8)
+            ctk.CTkLabel(tile, text=label, font=(FONT, 12), text_color=MUTED).pack(side="left", padx=(0, 18))
+            self.stat_values[status] = value
+        self.filter = ctk.CTkSegmentedButton(stats, values=["To do", "Everything"], font=(FONT, 12),
+                                             selected_color=CARD, selected_hover_color=CARD,
+                                             unselected_color=GHOST, unselected_hover_color=GHOST_HOVER,
+                                             text_color=TEXT, fg_color=GHOST, corner_radius=10, height=34,
                                              command=lambda _: self._refresh_table())
-        self.filter.set("To file + attention")
+        self.filter.set("To do")
         self.filter.pack(side="right")
 
-        table_frame = ctk.CTkFrame(self)
-        table_frame.pack(fill="both", expand=True, padx=16, pady=6)
-        style = ttk.Style(self)
-        style.theme_use("clam")
-        style.configure("Treeview", rowheight=28, font=("Segoe UI", 10))
-        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
-        self.table = ttk.Treeview(table_frame, columns=[c[0] for c in COLUMNS], show="headings",
-                                  selectmode="extended")
+        # Table
+        table_card = _card(body)  # packed last (see end of _build) so it takes only the space left over
+        inner = ctk.CTkFrame(table_card, fg_color=CARD)
+        inner.pack(fill="both", expand=True, padx=2, pady=(8, 2))
+        self.table = ttk.Treeview(inner, columns=[c[0] for c in COLUMNS], show="headings",
+                                  selectmode="extended", style="Modern.Treeview")
         for key, title, width in COLUMNS:
-            self.table.heading(key, text=title)
+            self.table.heading(key, text=title, anchor="w")
             self.table.column(key, width=width, anchor="w", stretch=key in ("message", "files", "product"))
-        for status, (color, _) in STATUS_STYLE.items():
-            self.table.tag_configure(status, background=color)
-        ys = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview)
-        xs = ttk.Scrollbar(table_frame, orient="horizontal", command=self.table.xview)
+        for status, (_, colour, tint) in STATUS_STYLE.items():
+            self.table.tag_configure(status, background=tint)
+        ys = ctk.CTkScrollbar(inner, command=self.table.yview)
+        xs = ctk.CTkScrollbar(inner, command=self.table.xview, orientation="horizontal")
         self.table.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
-        self.table.grid(row=0, column=0, sticky="nsew")
-        ys.grid(row=0, column=1, sticky="ns")
-        xs.grid(row=1, column=0, sticky="ew")
-        table_frame.grid_rowconfigure(0, weight=1)
-        table_frame.grid_columnconfigure(0, weight=1)
+        self.table.grid(row=0, column=0, sticky="nsew", padx=(12, 0))
+        ys.grid(row=0, column=1, sticky="ns", padx=4)
+        xs.grid(row=1, column=0, sticky="ew", padx=12)
+        inner.grid_rowconfigure(0, weight=1)
+        inner.grid_columnconfigure(0, weight=1)
         self.table.bind("<Double-1>", self._open_row_folder)
         self.table.bind("<<TreeviewSelect>>", lambda _: self._update_start_label())
-        ctk.CTkLabel(self, text="Tip: double-click a row to open its attachment folder · select rows to file only "
-                                "those (Ctrl/Shift-click)", text_color="gray45", anchor="w").pack(fill="x", padx=18)
+        self.empty_label = ctk.CTkLabel(inner, text="Choose who is filing and the SAP export to get started.",
+                                        font=(FONT, 14), text_color=MUTED, fg_color=CARD)
+        self.empty_label.place(relx=0.5, rely=0.45, anchor="center")
+        ctk.CTkLabel(table_card, text="Double-click a row to open its attachment folder  ·  Ctrl/Shift-click to "
+                                      "file only selected rows", font=(FONT, 11), text_color=MUTED
+                     ).pack(anchor="w", padx=20, pady=(0, 10))
 
-        # Banner that asks you to act (log in / send?); lives in a slot that is empty when not needed
-        self.banner_slot = ctk.CTkFrame(self, fg_color="transparent", height=1)
-        self.banner_slot.pack(fill="x", padx=16)
-        self.banner = ctk.CTkFrame(self.banner_slot, fg_color="#fff8e1", border_color="#f9a825", border_width=2)
-        self.banner_label = ctk.CTkLabel(self.banner, text="", font=bold, wraplength=900, justify="left")
-        self.banner_label.pack(side="left", padx=14, pady=10)
+        # Banner slot (worker asks you something)
+        self.banner_slot = ctk.CTkFrame(body, fg_color="transparent", height=1)
+        self.banner = ctk.CTkFrame(self.banner_slot, fg_color="#fffbeb", border_color="#f59e0b", border_width=2,
+                                   corner_radius=14)
+        texts = ctk.CTkFrame(self.banner, fg_color="transparent")
+        texts.pack(side="left", fill="x", expand=True, padx=20, pady=8)
+        self.banner_title = ctk.CTkLabel(texts, text="", font=(FONT, 15, "bold"), text_color="#92400e")
+        self.banner_title.pack(anchor="w")
+        self.banner_text = ctk.CTkLabel(texts, text="", font=(FONT, 13), text_color="#78350f", wraplength=950,
+                                        justify="left")
+        self.banner_text.pack(anchor="w")
         self.banner_buttons = ctk.CTkFrame(self.banner, fg_color="transparent")
-        self.banner_buttons.pack(side="right", padx=10)
+        self.banner_buttons.pack(side="right", padx=14)
 
-        bottom = ctk.CTkFrame(self, fg_color="transparent")
-        bottom.pack(fill="x", padx=16, pady=(6, 4))
-        ctk.CTkLabel(bottom, text="2. Mode", font=bold).pack(side="left")
-        self.mode = ctk.CTkSegmentedButton(bottom, values=list(MODES))
-        self.mode.set(next(iter(MODES)))
-        self.mode.pack(side="left", padx=10)
-        self.start_btn = ctk.CTkButton(bottom, text="Start", width=180, height=36, font=bold,
-                                       command=self._start_run, state="disabled")
-        self.start_btn.pack(side="left", padx=10)
-        self.stop_btn = ctk.CTkButton(bottom, text="Stop", width=90, height=36, fg_color="#c62828",
-                                      hover_color="#8e0000", command=self._stop, state="disabled")
+        # Step 2 — run
+        run_card = _card(body)
+        controls = ctk.CTkFrame(run_card, fg_color="transparent")
+        controls.pack(fill="x", padx=20, pady=(14, 0))
+        _step(controls, "2", "File the requests").pack(side="left", padx=(0, 16))
+        _button(controls, "Open results folder", lambda: self.settings and _open(self.settings.results_dir),
+                width=160).pack(side="right")
+        self.log_btn = _button(controls, "Activity log", self._toggle_log, width=120)
+        self.log_btn.pack(side="right", padx=8)
+        self.mode = ctk.CTkSegmentedButton(controls, values=list(MODES), font=(FONT, 13), height=40,
+                                           selected_color=CARD, selected_hover_color=CARD,
+                                           unselected_color=GHOST, unselected_hover_color=GHOST_HOVER,
+                                           text_color=TEXT, fg_color=GHOST, corner_radius=10,
+                                           command=lambda _: self._update_mode_hint())
+        self.mode.set("Dry run")
+        self.mode.pack(side="left")
+        self.start_btn = _button(controls, "Start", self._start_run, primary=True, width=190, height=42)
+        self.start_btn.pack(side="left", padx=14)
+        self.stop_btn = _button(controls, "Stop", self._stop, width=100, height=42, danger=True)
         self.stop_btn.pack(side="left")
-        ctk.CTkButton(bottom, text="Open results folder", width=150, fg_color="gray60", hover_color="gray45",
-                      command=lambda: self.settings and _open(self.settings.results_dir)).pack(side="right")
-
-        status = ctk.CTkFrame(self, fg_color="transparent")
-        status.pack(fill="x", padx=16, pady=(4, 2))
-        self.progress = ctk.CTkProgressBar(status)
+        line = ctk.CTkFrame(run_card, fg_color="transparent")
+        line.pack(fill="x", padx=22, pady=(8, 0))
+        self.mode_hint = ctk.CTkLabel(line, text="", font=(FONT, 12), text_color=MUTED, anchor="w")
+        self.mode_hint.pack(side="left")
+        self.status_label = ctk.CTkLabel(line, text="", font=(FONT, 12, "bold"), text_color=TEXT, anchor="e")
+        self.status_label.pack(side="right")
+        self.progress = ctk.CTkProgressBar(run_card, height=6, progress_color=ACCENT, fg_color=GHOST,
+                                           corner_radius=3)
         self.progress.set(0)
-        self.progress.pack(fill="x")
-        self.status_label = ctk.CTkLabel(status, text="Choose the SAP export and click “Check file”.", anchor="w")
-        self.status_label.pack(fill="x")
+        self.progress.pack(fill="x", padx=20, pady=(8, 14))
+        self.log = ctk.CTkTextbox(run_card, height=110, font=("Cascadia Mono", 11), fg_color=BG, text_color=MUTED,
+                                  corner_radius=10, border_width=0)  # shown with the 'Activity log' button
+        self._update_mode_hint()
+        self._set_busy(False, "")
 
-        self.log = ctk.CTkTextbox(self, height=110, font=("Consolas", 11))
-        self.log.pack(fill="x", padx=16, pady=(0, 12))
+        # Bottom-up so the run controls always stay on screen and the table fills what remains
+        run_card.pack(side="bottom", fill="x")
+        self.banner_slot.pack(side="bottom", fill="x")
+        table_card.pack(fill="both", expand=True, pady=12)
 
-    # ---------- config / file ----------
+    def _style_table(self) -> None:
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.layout("Modern.Treeview", [("Modern.Treeview.treearea", {"sticky": "nswe"})])
+        style.configure("Modern.Treeview", background=CARD, fieldbackground=CARD, foreground=TEXT, rowheight=36,
+                        borderwidth=0, font=(FONT, 10))
+        style.map("Modern.Treeview", background=[("selected", "#e0e7ff")], foreground=[("selected", TEXT)])
+        style.configure("Modern.Treeview.Heading", background=CARD, foreground=MUTED, font=(FONT, 9, "bold"),
+                        relief="flat", borderwidth=0, padding=(6, 10))
+        style.map("Modern.Treeview.Heading", background=[("active", BG)])
+
+    # ---------- config / person / file ----------
 
     def _load_config(self) -> None:
         if not CONFIG_PATH.exists():
@@ -204,12 +344,47 @@ class App(ctk.CTk):
         except Exception as exc:
             messagebox.showerror("Settings error", f"config.yaml could not be read:\n{exc}")
             return
-        users = ", ".join(f"{folder or '(whole root)'} ({sap})" for sap, folder in self.settings.users.items())
-        self.info_label.configure(text=f"Attachments: {self.settings.attachments_root}     ·     Users: {users}")
+        labels = [p.label for p in self.settings.users.values()]
+        self.profile_menu.configure(values=labels or ["(no users in config)"])
+        if self.profile is None or self.profile.sap_user not in self.settings.users:
+            self.profile = next(iter(self.settings.users.values()), None)
+        else:
+            self.profile = self.settings.users[self.profile.sap_user]
+        if self.profile:
+            self.profile_menu.set(self.profile.label)
+        self._refresh_profile_info()
+
+    def _on_profile(self, label: str) -> None:
+        if self.busy or not self.settings:
+            return
+        self.profile = next((p for p in self.settings.users.values() if p.label == label), None)
+        self.plan = []
+        self._refresh_table()
+        self._refresh_profile_info()
+        if self.excel_entry.get().strip():
+            self._start_plan()
+
+    def _refresh_profile_info(self) -> None:
+        if not self.settings or not self.profile:
+            return
+        self.login_saved = get_login(self.profile.sap_user) is not None
+        if self.login_saved:
+            self.login_badge.configure(text="●  Login saved", fg_color="#064e3b", text_color="#a7f3d0")
+        else:
+            self.login_badge.configure(text="●  No login saved", fg_color="#78350f", text_color="#fde68a")
+        folder = self.settings.attachments_root / (self.profile.folder or "")
+        self.info_label.configure(text=f"Only {self.profile.display_name or self.profile.sap_user}'s rows "
+                                       f"(Usage dec. made by = {self.profile.sap_user})   ·   Attachments: {folder}")
+
+    def _edit_login(self) -> None:
+        if not self.profile or self.busy:
+            return
+        dialog = LoginDialog(self, self.profile)
+        self.wait_window(dialog)
+        self._refresh_profile_info()
 
     def _browse(self) -> None:
-        start = Path.home() / "Downloads"
-        path = filedialog.askopenfilename(title="Choose the SAP export", initialdir=str(start),
+        path = filedialog.askopenfilename(title="Choose the SAP export", initialdir=str(Path.home() / "Downloads"),
                                           filetypes=[("Excel", "*.xlsx *.XLSX *.xls"), ("All files", "*.*")])
         if path:
             self.excel_entry.delete(0, "end")
@@ -223,19 +398,22 @@ class App(ctk.CTk):
             return
         self._load_config()
         path = Path(self.excel_entry.get().strip().strip('"'))
-        if not self.settings or not path.is_file():
+        if not self.settings or not self.profile:
+            messagebox.showwarning("No person", "Add the people who file to config.yaml (users:).")
+            return
+        if not path.is_file():
             messagebox.showwarning("No file", "Choose the SAP export (.xlsx) first.")
             return
         self.excel_path = path
-        self._set_busy(True, f"Checking {path.name} and searching the attachment folders…")
+        self._set_busy(True, f"Checking {path.name} and searching {self.profile.display_name}'s folders…")
         self.progress.configure(mode="indeterminate")
         self.progress.start()
-        settings = self.settings
+        settings, user = self.settings, self.profile.sap_user
 
         def work() -> None:
             try:
-                plan = build_plan(path, settings, load_ledger(settings.results_dir))
-                report = write_report(settings.results_dir, plan, "plan")
+                plan = build_plan(path, settings, load_ledger(settings.results_dir), only_user=user)
+                report = write_report(settings.results_dir, plan, f"plan_{user}")
                 self.call(lambda: self._plan_done(plan, report))
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"
@@ -245,14 +423,13 @@ class App(ctk.CTk):
 
     def _plan_done(self, plan: list[Request], report: Path) -> None:
         self.plan = plan
-        self.progress.stop()
-        self.progress.configure(mode="determinate")
-        self.progress.set(0)
+        self._stop_progress()
         self._refresh_table()
         counts = summarize(plan)
-        self._set_busy(False, f"{len(plan)} rows for your users — {counts.get(READY, 0)} ready to file. "
-                              f"Plan saved: {report.name}")
-        self._log(f"Checked {self.excel_path.name if self.excel_path else ''}: {counts}")
+        who = self.profile.display_name if self.profile else ""
+        self._set_busy(False, f"{len(plan)} rows for {who} — {counts.get(READY, 0)} ready to file.")
+        self._log(f"Checked {self.excel_path.name if self.excel_path else ''} for {who}: {counts}  "
+                  f"(plan saved: {report.name})")
 
     # ---------- run ----------
 
@@ -265,71 +442,88 @@ class App(ctk.CTk):
         if self.busy:
             return
         n = len(self._selected_ready()) if self.plan else 0
-        self.start_btn.configure(text=f"Start ({n})" if n else "Start",
+        self.start_btn.configure(text=f"Start  ·  {n} request{'s' if n != 1 else ''}" if n else "Start",
                                  state="normal" if n else "disabled")
+
+    def _update_mode_hint(self) -> None:
+        self.mode_hint.configure(text=MODE_HINTS[MODES[self.mode.get()]])
 
     def _start_run(self) -> None:
         todo = self._selected_ready()
-        if not todo or not self.settings or not self.excel_path:
+        profile = self.profile
+        if not todo or not self.settings or not self.excel_path or not profile:
             return
         mode = MODES[self.mode.get()]
         if mode == "auto" and not messagebox.askyesno(
-                "Send without asking?", f"Send {len(todo)} request(s) to the Ministry of Health without asking "
-                                        f"before each one?\n\nThis files them officially under your account."):
+                "Send without asking?", f"Send {len(todo)} request(s) to the Ministry of Health as "
+                                        f"{profile.display_name}, without asking before each one?\n\n"
+                                        "They are filed officially under your account."):
             return
-        from batch_release.runner import file_requests  # loads Playwright only when needed
+        from batch_release.portal import IdentityMismatch  # loads Playwright only when needed
+        from batch_release.runner import file_requests
 
         self.stop_requested.clear()
         self._set_busy(True, "Opening Chrome…", running=True)
         self.progress.set(0)
         settings, excel_name, total = self.settings, self.excel_path.name, len(todo)
+        login = get_login(profile.sap_user)
 
         def on_start(n: int, r: Request) -> None:
-            self.call(lambda: self._status(f"[{n}/{total}] Filling batch {r.batch} — {r.product}"))
+            self.call(lambda: self._status(f"[{n}/{total}]  Filling batch {r.batch} — {r.product}"))
 
         def on_done(n: int, r: Request) -> None:
             def ui() -> None:
                 self.progress.set(n / total)
                 self._update_row(r)
-                self._log(f"[{n}/{total}] {r.batch}: {r.status} — {r.message}")
+                self._log(f"[{n}/{total}] {r.batch}: {STATUS_STYLE.get(r.status, (r.status,))[0]} — {r.message}")
             self.call(ui)
 
         def work() -> None:
             try:
                 file_requests(settings, todo, mode, excel_name, self.prompts, on_start=on_start, on_done=on_done,
-                              should_stop=self.stop_requested.is_set)
+                              should_stop=self.stop_requested.is_set, profile=profile, login=login)
                 msg = "Stopped." if self.stop_requested.is_set() else "Done."
             except StopRequested:
                 msg = "Stopped."
+            except IdentityMismatch as exc:
+                msg = f"Blocked: {exc}"
+                self.call(lambda: messagebox.showerror("Wrong account", str(exc)))
             except Exception as exc:
                 msg = f"Run aborted: {type(exc).__name__}: {str(exc).splitlines()[0] if str(exc) else ''}"
                 self.call(lambda: self._log(traceback.format_exc()))
-            report = write_report(settings.results_dir, self.plan, f"results_{mode}")
-            self.call(lambda: self._run_done(f"{msg} Results saved: {report.name}"))
+            report = write_report(settings.results_dir, self.plan, f"results_{mode}_{profile.sap_user}")
+            self.call(lambda: self._run_done(msg, report))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _run_done(self, msg: str) -> None:
+    def _run_done(self, msg: str, report: Path) -> None:
         self.hide_banner()
         self._refresh_table()
         self._set_busy(False, msg)
-        self._log(msg)
+        self._log(f"{msg} Results saved: {report.name}")
+
+    def _toggle_log(self) -> None:
+        if self.log.winfo_ismapped():
+            self.log.pack_forget()
+        else:
+            self.log.pack(fill="x", padx=20, pady=(0, 14))
 
     def _stop(self) -> None:
         self.stop_requested.set()
         self._status("Stopping after the current request…")
 
-    # ---------- banner (worker asks you something) ----------
+    # ---------- banner ----------
 
-    def show_banner(self, text: str, buttons: list[tuple[str, str]]) -> None:
-        self.banner_label.configure(text=text)
+    def show_banner(self, title: str, text: str, buttons: list[tuple[str, str]]) -> None:
+        self.banner_title.configure(text=title)
+        self.banner_text.configure(text=text)
         for child in self.banner_buttons.winfo_children():
             child.destroy()
-        for title, value in buttons:
-            color = "#2e7d32" if value in ("ok", "send") else "gray55"
-            ctk.CTkButton(self.banner_buttons, text=title, width=130, height=34, fg_color=color,
-                          command=lambda v=value: self.prompts.answer(v)).pack(side="left", padx=4, pady=8)
-        self.banner.pack(fill="x", pady=6)
+        for label, value in buttons:
+            primary = value in ("ok", "send")
+            _button(self.banner_buttons, label, lambda v=value: self.prompts.answer(v), primary=primary,
+                    width=140, height=40).pack(side="left", padx=5, pady=12)
+        self.banner.pack(fill="x", pady=(0, 12))
         self.bell()
         self.lift()
 
@@ -344,9 +538,11 @@ class App(ctk.CTk):
         for r in self.plan:
             if show_all or r.status != SKIPPED:
                 self.table.insert("", "end", iid=str(r.excel_row), values=_row_values(r), tags=(r.status,))
-        counts = summarize(self.plan)
-        for status, lbl in self.chip_labels.items():
-            lbl.configure(text=f"{STATUS_STYLE[status][1]}: {counts.get(status, 0)}")
+        if self.plan:
+            self.empty_label.place_forget()
+        else:
+            self.empty_label.place(relx=0.5, rely=0.45, anchor="center")
+        self._refresh_stats()
         self._update_start_label()
 
     def _update_row(self, r: Request) -> None:
@@ -354,9 +550,12 @@ class App(ctk.CTk):
         if self.table.exists(iid):
             self.table.item(iid, values=_row_values(r), tags=(r.status,))
             self.table.see(iid)
+        self._refresh_stats()
+
+    def _refresh_stats(self) -> None:
         counts = summarize(self.plan)
-        for status, lbl in self.chip_labels.items():
-            lbl.configure(text=f"{STATUS_STYLE[status][1]}: {counts.get(status, 0)}")
+        for status, lbl in self.stat_values.items():
+            lbl.configure(text=str(counts.get(status, 0)))
 
     def _open_row_folder(self, _event: object) -> None:
         iid = self.table.focus()
@@ -381,9 +580,18 @@ class App(ctk.CTk):
     def _set_busy(self, busy: bool, text: str, running: bool = False) -> None:
         self.busy = busy
         self.check_btn.configure(state="disabled" if busy else "normal")
+        self.profile_menu.configure(state="disabled" if busy else "normal")
         self.stop_btn.configure(state="normal" if running else "disabled")
-        self.start_btn.configure(state="disabled") if busy else self._update_start_label()
+        if busy:
+            self.start_btn.configure(state="disabled")
+        else:
+            self._update_start_label()
         self._status(text)
+
+    def _stop_progress(self) -> None:
+        self.progress.stop()
+        self.progress.configure(mode="determinate")
+        self.progress.set(0)
 
     def _status(self, text: str) -> None:
         self.status_label.configure(text=text)
@@ -393,20 +601,55 @@ class App(ctk.CTk):
         self.log.see("end")
 
     def _failed(self, title: str, err: str) -> None:
-        self.progress.stop()
-        self.progress.configure(mode="determinate")
-        self.progress.set(0)
+        self._stop_progress()
         self._set_busy(False, err)
         self._log(err)
         messagebox.showerror(title, err)
 
 
+# ---------- widget factories (one look across the app) ----------
+
+def _card(master: ctk.CTkBaseClass) -> ctk.CTkFrame:
+    return ctk.CTkFrame(master, fg_color=CARD, corner_radius=16, border_width=1, border_color=BORDER)
+
+
+def _step(master: ctk.CTkBaseClass, number: str, title: str) -> ctk.CTkFrame:
+    frame = ctk.CTkFrame(master, fg_color="transparent")
+    ctk.CTkLabel(frame, text=number, width=26, height=26, corner_radius=13, fg_color=ACCENT, text_color="white",
+                 font=(FONT, 12, "bold")).pack(side="left")
+    ctk.CTkLabel(frame, text=title, font=(FONT, 16, "bold"), text_color=TEXT).pack(side="left", padx=10)
+    return frame
+
+
+def _field_label(master: ctk.CTkBaseClass, text: str) -> ctk.CTkLabel:
+    return ctk.CTkLabel(master, text=text, font=(FONT, 12, "bold"), text_color=TEXT)
+
+
+def _entry(master: ctk.CTkBaseClass, placeholder: str, show: str = "") -> ctk.CTkEntry:
+    return ctk.CTkEntry(master, placeholder_text=placeholder, height=40, corner_radius=10, border_width=1,
+                        border_color=BORDER, fg_color="#fbfcfe", text_color=TEXT, font=(FONT, 13), show=show)
+
+
+def _button(master: ctk.CTkBaseClass, text: str, command: Callable[[], object], primary: bool = False,
+            danger: bool = False, dark: bool = False, width: int = 120, height: int = 40) -> ctk.CTkButton:
+    if primary:
+        colours = dict(fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="white")
+    elif danger:
+        colours = dict(fg_color="#fef2f2", hover_color="#fee2e2", text_color="#b91c1c", border_width=1,
+                       border_color="#fecaca")
+    elif dark:
+        colours = dict(fg_color="#1f2937", hover_color="#374151", text_color="#e5e7eb")
+    else:
+        colours = dict(fg_color=GHOST, hover_color=GHOST_HOVER, text_color=TEXT)
+    return ctk.CTkButton(master, text=text, command=command, width=width, height=height, corner_radius=10,
+                         font=(FONT, 13, "bold" if primary else "normal"), **colours)
+
+
 def _row_values(r: Request) -> tuple[str, ...]:
-    label = STATUS_STYLE.get(r.status, ("", r.status))[1]
+    label = STATUS_STYLE.get(r.status, (r.status,))[0]
     lot = r.lot_created.strftime("%d/%m/%Y") if r.lot_created else ""
     files = ", ".join(p.name for p in r.files)
-    return (str(r.excel_row), label, r.batch, r.product, r.license or r.license_raw, r.decided_by, lot, files,
-            r.message)
+    return (str(r.excel_row), f"●  {label}", r.batch, r.product, r.license or r.license_raw, lot, files, r.message)
 
 
 # Open a file or folder with its Windows default program

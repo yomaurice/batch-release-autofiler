@@ -8,12 +8,25 @@ portal_url: https://qpbatchrelease.health.gov.il/batch-release
 attachments_root: test_data/s_drive
 folder_search_depth: 3          # folder levels searched below each user's folder
 
-# Rows are filed only when "Usage dec. made by" is one of these SAP users.
-# Value = that user's sub-folder under attachments_root (leave empty to search the whole root).
+# People who file requests. Only rows whose "Usage dec. made by" is the selected person are filed.
+#   folder       = their sub-folder under attachments_root
+#   portal_name  = their name exactly as in the portal greeting "שלום, <name>" (top-left after login).
+#                  The app checks it after login, so nobody can file under someone else's account.
+# Portal username + password are NOT stored here: enter them once in the app ("Login details"),
+# and they are kept encrypted in Windows Credential Manager.
 users:
-  DSABAG01: Dudi
-  EBISMUTH: Esther
-  GSHETRIT: Gil
+  DSABAG01:
+    display_name: Dudi
+    folder: Dudi
+    portal_name: דוד
+  EBISMUTH:
+    display_name: Esther
+    folder: Esther
+    portal_name: אסתר      # TODO: confirm against the portal greeting
+  GSHETRIT:
+    display_name: Gil
+    folder: Gil
+    portal_name: גיל       # TODO: confirm against the portal greeting
 
 # Date format typed into the portal's date fields
 portal_date_format: "%d/%m/%Y"

@@ -9,13 +9,17 @@ from typing import Protocol
 
 from playwright.sync_api import BrowserContext, Locator, Page, sync_playwright
 
-from .config import Settings
+from .config import Settings, UserProfile
+from .credentials import Login
 from .planner import Request
 from .report import append_ledger
 
 # How each form element is found. Prefix 'label:' / 'text:' (contains) / 'exact:' / 'role:', else CSS/XPath.
 # These are first guesses from the form's Hebrew labels; override them under 'selectors' in config.yaml.
 DEFAULT_SELECTORS = {
+    "login_username": "input[name=username]",          # MOH login page (idpotp.health.gov.il)
+    "login_password": "input[name=password]",
+    "login_submit": "form#login button[type=submit]",
     "registered_product_button": "exact:אצווה לתכשיר רשום",
     "batch_number": "label:מספר אצווה",
     "mfg_date": "label:תאריך ייצור אצווה",
@@ -32,6 +36,10 @@ FILLED = "FILLED (not sent)"
 FILED = "FILED"
 FAILED = "FAILED"
 DECLINED = "NOT SENT (you declined)"
+
+
+class IdentityMismatch(RuntimeError):
+    """The account logged in on the portal is not the person this run files for."""
 
 
 class Prompts(Protocol):
@@ -61,9 +69,12 @@ class ConsolePrompts:
 class Portal:
     """Owns the browser window; you log in yourself, then it fills one form per request."""
 
-    def __init__(self, settings: Settings, prompts: Prompts | None = None) -> None:
+    def __init__(self, settings: Settings, prompts: Prompts | None = None,
+                 profile: UserProfile | None = None, login: Login | None = None) -> None:
         self.settings = settings
         self.prompts: Prompts = prompts or ConsolePrompts()
+        self.profile = profile    # who this run files for; every request must be theirs
+        self.login = login        # saved username/password to pre-fill (you still type the 2FA code)
         self.selectors = {**DEFAULT_SELECTORS, **settings.selectors}
         self.shots_dir = settings.results_dir / "screenshots"
         self._pw = None
@@ -90,22 +101,59 @@ class Portal:
         if self._pw:
             self._pw.stop()
 
-    # Open the portal and wait until you have logged in and the request form can be opened
+    # Open the portal, pre-fill username + password if saved, and wait until you have entered the 2FA code.
+    # Then check the portal greeting names the person this run files for.
     def wait_for_login(self) -> None:
         page = self._page()
         page.goto(self.settings.portal_url)
+        if self.login:
+            self._prefill_login(self.login)
         retry = False
         while True:
             self.prompts.wait_for_login(retry)
             if "qpbatchrelease" in page.url and "/batch-release" not in page.url:
                 page.goto(self.settings.portal_url)  # login sometimes lands on the site root
             if self._open_form(timeout_ms=8000):
+                self._verify_identity()
                 return
             retry = True
+
+    # Type the saved username and password on the MOH login page and press כניסה
+    def _prefill_login(self, login: Login) -> None:
+        user_box = self._locate(self.selectors["login_username"]).first
+        try:
+            user_box.wait_for(state="visible", timeout=20000)
+        except Exception:
+            return  # login page did not appear (already logged in, or layout changed) — you log in by hand
+        user_box.fill(login.username)
+        self._locate(self.selectors["login_password"]).first.fill(login.password)
+        self._locate(self.selectors["login_submit"]).first.click()
+
+    # Guard: the portal says 'שלום, <name>' — it must be the selected person, so nobody files another's batches
+    def _verify_identity(self) -> None:
+        if not self.profile:
+            return
+        expected = self.profile.portal_name
+        if not expected:
+            raise IdentityMismatch(f"no portal_name set for {self.profile.sap_user} in config.yaml — "
+                                   "it is needed to verify who is logged in")
+        greeting = self._page().evaluate("""() => {
+            const hits = [...document.querySelectorAll('body *')]
+                .filter(e => e.children.length <= 3 && /שלום/.test(e.innerText || ''))
+                .map(e => e.innerText.trim());
+            hits.sort((a, b) => a.length - b.length);
+            return hits[0] || '';
+        }""")
+        if _norm_name(expected) not in _norm_name(greeting):
+            raise IdentityMismatch(f"logged in as '{greeting or 'unknown'}', but this run is for "
+                                   f"{self.profile.label} (expected '{expected}'). Nothing was filed.")
 
     # Fill the form for one request; send it only if mode allows
     def file_request(self, req: Request, mode: str, excel_name: str) -> None:
         page = self._page()
+        if self.profile and req.decided_by != self.profile.sap_user:
+            req.status, req.message = FAILED, f"blocked: row belongs to {req.decided_by}, not {self.profile.sap_user}"
+            return
         try:
             page.goto(self.settings.portal_url)
             if not self._open_form(timeout_ms=20000):
@@ -264,6 +312,11 @@ class Portal:
         except Exception:
             pass
         return path
+
+
+# Compare names ignoring spaces, commas and case
+def _norm_name(text: str) -> str:
+    return re.sub(r"[\s,]+", "", text or "").lower()
 
 
 # Best-effort grab of the request/reference number shown after sending

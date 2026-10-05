@@ -38,8 +38,10 @@ class Request:
         return f"{self.batch}|{self.license}|{lot}"
 
 
-# Read the export and resolve each row into a Request (nothing is sent anywhere here)
-def build_plan(excel_path: Path, settings: Settings, already_filed: set[str]) -> list[Request]:
+# Read the export and resolve each row into a Request (nothing is sent anywhere here).
+# only_user restricts the plan to one person's rows — the guard that stops filing someone else's batches.
+def build_plan(excel_path: Path, settings: Settings, already_filed: set[str],
+               only_user: str | None = None) -> list[Request]:
     cols = settings.columns
     df = pd.read_excel(excel_path, dtype=str).fillna("")
     missing = [c for c in cols.values() if c not in df.columns]
@@ -56,6 +58,8 @@ def build_plan(excel_path: Path, settings: Settings, already_filed: set[str]) ->
         if not batch:  # totals row / blank lines at the bottom of the export
             continue
         if settings.users and decided_by not in settings.users:
+            continue
+        if only_user and decided_by != only_user.upper():
             continue
 
         req = Request(
@@ -112,7 +116,8 @@ def _validate(req: Request, index: FolderIndex | str,
 # Scan each user's personal folder once (root/<folder name>); a scan error is kept as a message
 def _index_for(user: str, settings: Settings, cache: dict[str, "FolderIndex | str"]) -> "FolderIndex | str":
     if user not in cache:
-        sub = settings.users.get(user)
+        profile = settings.users.get(user)
+        sub = profile.folder if profile else None
         root = settings.attachments_root / sub if sub else settings.attachments_root
         try:
             cache[user] = FolderIndex(root, settings.folder_search_depth)

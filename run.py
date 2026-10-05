@@ -13,12 +13,12 @@ MODES = ("dry-run", "confirm", "auto")
 # Resolve the Excel export, print a summary and write the plan workbook
 def cmd_plan(args: argparse.Namespace) -> list:
     settings = load_settings(args.config)
-    plan = build_plan(args.excel, settings, load_ledger(settings.results_dir))
+    plan = build_plan(args.excel, settings, load_ledger(settings.results_dir), only_user=args.user)
     if args.rows:
         wanted = set(args.rows)
         plan = [r for r in plan if r.excel_row in wanted]
     path = write_report(settings.results_dir, plan, "plan")
-    print(f"\nRows for users {settings.users or '(all users)'}: {len(plan)}")
+    print(f"\nRows for users {', '.join(u.label for u in settings.users.values()) or '(all users)'}: {len(plan)}")
     for status, count in summarize(plan).items():
         print(f"  {status:<16} {count}")
     print(f"Plan written to: {path}\n")
@@ -27,10 +27,14 @@ def cmd_plan(args: argparse.Namespace) -> list:
 
 # Build the plan, then fill (and depending on mode, send) every READY request
 def cmd_submit(args: argparse.Namespace) -> None:
+    from batch_release.credentials import get_login
     from batch_release.portal import ConsolePrompts  # Playwright is only needed for this command
     from batch_release.runner import file_requests
 
     settings = load_settings(args.config)
+    profile = settings.users.get((args.user or "").upper())
+    if not profile:
+        sys.exit(f"submit needs --user, one of: {', '.join(settings.users)}")
     plan = cmd_plan(args)
     ready = [r for r in plan if r.status == READY]
     if args.limit:
@@ -48,7 +52,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
         settings, ready, args.mode, args.excel.name, ConsolePrompts(),
         on_start=lambda n, r: print(f"[{n}/{len(ready)}] row {r.excel_row}  batch {r.batch}  {r.product}"),
         on_done=lambda n, r: print(f"        -> {r.status}  {r.message}"),
-        pause_s=args.pause,
+        pause_s=args.pause, profile=profile, login=get_login(profile.sap_user),
     )
 
     path = write_report(settings.results_dir, plan, f"results_{args.mode}")
@@ -79,6 +83,7 @@ def main() -> None:
         p = sub.add_parser(name, help=help_text)
         p.add_argument("excel", type=Path, help="SAP export (.xlsx)")
         p.add_argument("--rows", type=int, nargs="*", help="only these Excel row numbers")
+        p.add_argument("--user", help="SAP user filing (e.g. DSABAG01); only their rows are used")
         p.set_defaults(func=fn)
         if name == "submit":
             p.add_argument("--mode", choices=MODES, default="dry-run")

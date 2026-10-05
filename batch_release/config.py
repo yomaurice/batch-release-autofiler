@@ -18,11 +18,23 @@ DEFAULT_COLUMNS = {
 
 
 @dataclass
+class UserProfile:
+    """One person who files requests: their SAP name, folder on the share and identity on the portal."""
+    sap_user: str
+    folder: str | None = None        # sub-folder under attachments_root (None = search the whole root)
+    display_name: str = ""           # shown in the app, e.g. 'Dudi'
+    portal_name: str = ""            # name in the portal's 'שלום, <name>' greeting, used to verify the login
+
+    @property
+    def label(self) -> str:
+        return f"{self.display_name or self.folder or self.sap_user} ({self.sap_user})"
+
+
+@dataclass
 class Settings:
     portal_url: str
     attachments_root: Path
-    # SAP user -> name of that user's sub-folder under attachments_root (None = search the whole root)
-    users: dict[str, str | None]
+    users: dict[str, UserProfile]
     columns: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_COLUMNS))
     folder_search_depth: int = 4
     portal_date_format: str = "%d/%m/%Y"
@@ -54,10 +66,20 @@ def _resolve(value: str) -> Path:
     return p if p.is_absolute() else PROJECT_ROOT / p
 
 
-# 'users' may be a list of SAP names or a mapping SAP name -> personal folder name
-def _parse_users(value: object) -> dict[str, str | None]:
+# 'users' maps SAP name -> folder name (short form) or -> {folder, display_name, portal_name}
+def _parse_users(value: object) -> dict[str, UserProfile]:
     if not value:
         return {}
-    if isinstance(value, dict):
-        return {str(k).strip().upper(): (str(v).strip() if v else None) for k, v in value.items()}
-    return {str(u).strip().upper(): None for u in value}  # type: ignore[union-attr]
+    if not isinstance(value, dict):
+        return {str(u).strip().upper(): UserProfile(str(u).strip().upper()) for u in value}  # type: ignore[union-attr]
+    users: dict[str, UserProfile] = {}
+    for key, entry in value.items():
+        sap = str(key).strip().upper()
+        if isinstance(entry, dict):
+            folder = str(entry.get("folder") or "").strip() or None
+            users[sap] = UserProfile(sap, folder, str(entry.get("display_name") or folder or "").strip(),
+                                     str(entry.get("portal_name") or "").strip())
+        else:
+            folder = str(entry).strip() if entry else None
+            users[sap] = UserProfile(sap, folder, folder or "")
+    return users

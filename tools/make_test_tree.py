@@ -54,7 +54,8 @@ def main() -> None:
         lot = pd.to_datetime(row[cols["lot_created"]]).date()
         product = _BAD_CHARS.sub("_", row[cols["product"]].strip())
         delivery = row.get("Delivery", "").strip()
-        user_dir = args.root / (settings.users.get(user) or "")
+        profile = settings.users.get(user)
+        user_dir = args.root / ((profile.folder if profile else None) or "")
         folder = user_dir / f"{product} {batch} {lot:%d.%m.%Y} {delivery}".strip()
         name, files = _SCENARIOS[made % len(_SCENARIOS)]
         for f in files:
