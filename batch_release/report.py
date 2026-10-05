@@ -52,7 +52,8 @@ def write_report(results_dir: Path, plan: list[Request], label: str) -> Path:
         "Lot created on": r.lot_created,
         "Decided by": r.decided_by,
         "Folder": str(r.folder or ""),
-        "Files": "\n".join(p.name for p in r.files),
+        "Attach rule": r.attach_rule,
+        "Files":"\n".join(p.name for p in r.files),
     } for r in plan]
     pd.DataFrame(rows).to_excel(path, index=False)
     return path

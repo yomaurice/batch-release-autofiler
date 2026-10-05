@@ -14,7 +14,7 @@ per Excel row, attaches that batch's documents and, depending on the mode, sends
 | תאריך ייצור אצווה | `MFG Date` |
 | תפוגת אצווה | `Expiry Date` |
 | מספר רישום תכשיר | `GI External License number`: `IL-` dropped, `.` → `-` (`IL-146.13.33189.00` → `146-13-33189-00`) |
-| צרופות | every file in the batch's folder (see below) |
+| צרופות | files from the batch folder, chosen by the rules below |
 | הצהרה checkbox | ticked |
 
 Rows are filed only when `Usage dec. made by` is one of the `users` in `config.yaml`.
@@ -22,10 +22,22 @@ Rows are filed only when `Usage dec. made by` is one of the `users` in `config.y
 **Skipped:** blank or totals rows, non-IL licenses, duplicates of an earlier row (same batch + license +
 lot date), and anything already filed in a previous run (`results/filed_ledger.csv`).
 
-**Attachment folder:** found by searching `attachments_root` for a folder whose name contains the batch
-number as a whole word. If several match, the one whose name holds the **Lot created on** date wins.
-If that still isn't unique, the row is marked `NEEDS_ATTENTION` and the candidate folders are listed.
-Dates in folder names may be written `15.04.2026`, `15-04-26`, `2026-04-15`, `20260415` or `150426`.
+**Attachment folder:** searched only inside the user's own folder:
+`attachments_root\<user folder>\`. The folder is mapped from the `Usage dec. made by` value under
+`users` in `config.yaml`, e.g. `DSABAG01: Dudi`. Folders look like
+`ABITREN TEVA 75MG_3ML 10 AMP 44216 25.05.2026 1802347455 ...`, and the batch must appear in the name
+as a whole word. If several folders match, the one carrying the **Lot created on** date wins. If that
+still isn't unique, the row is marked `NEEDS_ATTENTION` and the candidates are listed.
+
+**Which files are uploaded.** The first rule that applies wins:
+
+1. The folder has a `MOH_SUB` sub-folder → every file inside `MOH_SUB`.
+2. A file whose name starts with `OK 3rd P replenish` exists → every file containing that phrase, plus
+   the file(s) named after the batch.
+3. A file containing `report-` exists → every file containing `report-`, plus every file containing `COA`.
+4. None of the above → the row is flagged `NEEDS_ATTENTION`.
+
+Rule 2 without a batch-named file, and rule 3 without a COA, are also flagged. Matching ignores case.
 
 ## Setup (once)
 
@@ -36,7 +48,7 @@ py -m venv .venv
 copy config.example.yaml config.yaml
 ```
 
-Edit `config.yaml`: put your SAP usernames under `users` and set `attachments_root`. The script uses your
+Edit `config.yaml`: map each SAP username to its folder under `users`, and set `attachments_root`. The script uses your
 installed Chrome (`browser_channel: chrome`), so `playwright install` isn't needed.
 
 ## Monthly use
@@ -60,12 +72,12 @@ Useful flags: `--limit 1` to process one request only, and `--rows 4 7` for spec
 ## Testing without the real share
 
 ```bat
-.venv\Scripts\python tools\make_test_tree.py "...\05.10.26.XLSX" --limit 15
+.venv\Scripts\python tools\make_test_tree.py "...\05.10.26.XLSX" --limit 12
 ```
 
-This creates `test_data\attachments\<year>\<batch> <dd.mm.yyyy>\` with dummy PDFs for the first 15 rows,
-plus an older duplicate folder to exercise the date matching. Use `--pattern` to mimic the real naming,
-e.g. `--pattern "{lot:%Y%m%d}_{batch}"`.
+This creates `test_data\s_drive\<user folder>\<PRODUCT> <batch> <dd.mm.yyyy> <delivery>\` with dummy
+PDFs. The rows cycle through the four attachment cases (MOH_SUB / replenish / report- / nothing), so
+`plan` shows each rule working.
 
 ## Calibrating the form (first run)
 

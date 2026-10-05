@@ -2,17 +2,18 @@
 
 portal_url: https://qpbatchrelease.health.gov.il/batch-release
 
-# Root folder searched for '<batch> ... <lot-created date>' attachment folders.
-# On the work PC this is the real share (e.g. \\server\QA\Batch Release); for testing use the fake tree
-# made by: python tools/make_test_tree.py <export.xlsx>
-attachments_root: test_data/attachments
-folder_search_depth: 4          # how many folder levels below the root are searched
-attach_extensions: [".pdf"]     # file types uploaded from the batch folder ([] = all files)
-attach_recursive: false         # also upload files from sub-folders of the batch folder
+# Root holding one sub-folder per user, each containing '<PRODUCT> <batch> <dd.mm.yyyy> <delivery>' folders.
+# Work PC:  S:\Batch ready for release\AA Pending QP Release\AA RELEASED & BEFORE MOH PORTAL
+# Testing:  test_data/s_drive  (built by: python tools/make_test_tree.py <export.xlsx>)
+attachments_root: test_data/s_drive
+folder_search_depth: 3          # folder levels searched below each user's folder
 
-# Only rows whose "Usage dec. made by" is one of these SAP users are filed
+# Rows are filed only when "Usage dec. made by" is one of these SAP users.
+# Value = that user's sub-folder under attachments_root (leave empty to search the whole root).
 users:
-  - EXAMPLEUSER01
+  DSABAG01: Dudi
+  EBISMUTH: ""       # TODO: folder name
+  GSHETRIT: ""       # TODO: folder name
 
 # Date format typed into the portal's date fields
 portal_date_format: "%d/%m/%Y"

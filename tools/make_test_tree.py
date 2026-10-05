@@ -1,5 +1,6 @@
-"""Build a fake attachments folder tree from an SAP export, for testing on a machine without the real share."""
+"""Build a fake attachments tree from an SAP export, mirroring the S: drive, for testing off-site."""
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -12,17 +13,24 @@ from batch_release.config import PROJECT_ROOT, load_settings  # noqa: E402
 # Smallest valid PDF, so the portal accepts the upload
 _PDF = (b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj "
         b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n")
-_BAD_CHARS = set('\\/:*?"<>|')
+_BAD_CHARS = re.compile(r'[\\/:*?"<>|]')
+
+# File sets per scenario; rows cycle through them so every attachment rule is exercised
+_SCENARIOS: list[tuple[str, list[str]]] = [
+    ("moh_sub", ["MOH_SUB/COA {batch}.pdf", "MOH_SUB/Release letter {batch}.pdf", "internal notes.pdf"]),
+    ("replenish", ["OK 3rd P replenish {batch}.pdf", "OK 3rd P replenish annex.pdf", "{batch}.pdf", "other.pdf"]),
+    ("report", ["report-{batch}.pdf", "COA {batch}.pdf", "COA supplier.pdf", "checklist.pdf"]),
+    ("nothing", ["checklist.pdf", "scan001.pdf"]),
+]
 
 
-# One folder per selected row: <root>/<year>/<batch> <dd.mm.yyyy>/  (+ a deliberately ambiguous pair)
+# <root>/<user folder>/<PRODUCT> <batch> <dd.mm.yyyy> <delivery>/...  — same shape as the real share
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("excel", type=Path)
-    parser.add_argument("--root", type=Path, default=PROJECT_ROOT / "test_data" / "attachments")
+    parser.add_argument("--root", type=Path, default=PROJECT_ROOT / "test_data" / "s_drive")
     parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "config.yaml")
-    parser.add_argument("--limit", type=int, default=15)
-    parser.add_argument("--pattern", default="{batch} {lot:%d.%m.%Y}", help="folder-name pattern")
+    parser.add_argument("--limit", type=int, default=16)
     args = parser.parse_args()
 
     settings = load_settings(args.config)
@@ -31,29 +39,28 @@ def main() -> None:
     df = df[df[cols["batch"]].str.strip() != ""]
     if settings.users:
         df = df[df[cols["decided_by"]].str.strip().str.upper().isin(settings.users)]
-    df = df.head(args.limit)
+    df = df.drop_duplicates([cols["batch"], cols["lot_created"]]).head(args.limit)
 
     made = 0
     for _, row in df.iterrows():
         batch = row[cols["batch"]].strip()
-        if _BAD_CHARS & set(batch):
+        if _BAD_CHARS.search(batch):
             continue
+        user = row[cols["decided_by"]].strip().upper()
         lot = pd.to_datetime(row[cols["lot_created"]]).date()
-        folder = args.root / f"{lot:%Y}" / args.pattern.format(batch=batch, lot=lot)
-        folder.mkdir(parents=True, exist_ok=True)
-        for doc in ("COA", "Release certificate"):
-            (folder / f"{doc} {batch}.pdf").write_bytes(_PDF)
+        product = _BAD_CHARS.sub("_", row[cols["product"]].strip())
+        delivery = row.get("Delivery", "").strip()
+        user_dir = args.root / (settings.users.get(user) or "")
+        folder = user_dir / f"{product} {batch} {lot:%d.%m.%Y} {delivery}".strip()
+        name, files = _SCENARIOS[made % len(_SCENARIOS)]
+        for f in files:
+            path = folder / f.format(batch=batch)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(_PDF)
+        print(f"  [{name:<9}] {folder.relative_to(args.root)}")
         made += 1
 
-    # An older submission of the first batch, so the date-disambiguation path gets exercised
-    if made:
-        first = df.iloc[0]
-        older = args.root / "2025" / args.pattern.format(batch=first[cols["batch"]].strip(),
-                                                         lot=pd.Timestamp("2025-01-01").date())
-        older.mkdir(parents=True, exist_ok=True)
-        (older / "old COA.pdf").write_bytes(_PDF)
-
-    print(f"Created {made} batch folders (+1 older duplicate) under {args.root}")
+    print(f"Created {made} batch folders under {args.root}")
 
 
 if __name__ == "__main__":

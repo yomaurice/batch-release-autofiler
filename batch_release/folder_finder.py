@@ -81,10 +81,55 @@ class FolderIndex:
         )
 
 
-# Files to upload from the chosen folder (skips Office lock files and other extensions)
-def list_attachments(folder: Path, extensions: list[str], recursive: bool) -> list[Path]:
-    iterator = folder.rglob("*") if recursive else folder.iterdir()
-    return sorted(
-        p for p in iterator
-        if p.is_file() and not p.name.startswith("~$") and (not extensions or p.suffix.lower() in extensions)
-    )
+MOH_SUB_DIR = "moh_sub"
+REPLENISH_PREFIX = "ok 3rd p replenish"
+REPORT_MARK = "report-"
+COA_MARK = "coa"
+
+
+@dataclass
+class AttachmentChoice:
+    files: list[Path]
+    rule: str
+    problem: str = ""
+
+
+# Pick the files to upload, by the first rule that applies:
+#   1. a MOH_SUB sub-folder        -> every file in it
+#   2. 'OK 3rd P replenish*' file  -> those files + the file(s) named after the batch
+#   3. a 'report-' file            -> those files + every 'COA' file
+#   otherwise the row is flagged for you
+def select_attachments(folder: Path, batch: str) -> AttachmentChoice:
+    moh_sub = next((d for d in folder.iterdir() if d.is_dir() and d.name.lower() == MOH_SUB_DIR), None)
+    if moh_sub is not None:
+        files = _files_in(moh_sub)
+        if not files:
+            return AttachmentChoice([], "MOH_SUB", f"MOH_SUB folder is empty: {moh_sub}")
+        return AttachmentChoice(files, "MOH_SUB")
+
+    files = _files_in(folder)
+    names = {p: _norm(p.name) for p in files}
+
+    if any(n.startswith(REPLENISH_PREFIX) for n in names.values()):
+        chosen = [p for p, n in names.items() if REPLENISH_PREFIX in n or name_contains_batch(p.stem, batch)]
+        if not any(name_contains_batch(p.stem, batch) and REPLENISH_PREFIX not in names[p] for p in chosen):
+            return AttachmentChoice(chosen, "OK 3rd P replenish", f"no file named after batch '{batch}'")
+        return AttachmentChoice(chosen, "OK 3rd P replenish")
+
+    if any(REPORT_MARK in n for n in names.values()):
+        chosen = [p for p, n in names.items() if REPORT_MARK in n or COA_MARK in n]
+        if not any(COA_MARK in names[p] for p in chosen):
+            return AttachmentChoice(chosen, "report- + COA", "no COA file found")
+        return AttachmentChoice(chosen, "report- + COA")
+
+    return AttachmentChoice([], "", "no MOH_SUB folder, 'OK 3rd P replenish' file or 'report-' file")
+
+
+# Regular files directly in a folder, skipping Office lock files
+def _files_in(folder: Path) -> list[Path]:
+    return sorted(p for p in folder.iterdir() if p.is_file() and not p.name.startswith("~$"))
+
+
+# Lower-case and collapse runs of spaces so 'OK  3rd P' still matches
+def _norm(name: str) -> str:
+    return re.sub(r"\s+", " ", name).strip().lower()

@@ -21,11 +21,10 @@ DEFAULT_COLUMNS = {
 class Settings:
     portal_url: str
     attachments_root: Path
-    users: list[str]
+    # SAP user -> name of that user's sub-folder under attachments_root (None = search the whole root)
+    users: dict[str, str | None]
     columns: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_COLUMNS))
     folder_search_depth: int = 4
-    attach_extensions: list[str] = field(default_factory=lambda: [".pdf"])
-    attach_recursive: bool = False
     portal_date_format: str = "%d/%m/%Y"
     browser_channel: str = "chrome"
     browser_profile_dir: Path = PROJECT_ROOT / "browser_profile"
@@ -40,11 +39,9 @@ def load_settings(path: Path) -> Settings:
     return Settings(
         portal_url=raw.get("portal_url", "https://qpbatchrelease.health.gov.il/batch-release"),
         attachments_root=_resolve(raw["attachments_root"]),
-        users=[str(u).strip().upper() for u in raw.get("users") or []],
+        users=_parse_users(raw.get("users")),
         columns=columns,
         folder_search_depth=int(raw.get("folder_search_depth", 4)),
-        attach_extensions=[e.lower() for e in raw.get("attach_extensions", [".pdf"])],
-        attach_recursive=bool(raw.get("attach_recursive", False)),
         portal_date_format=raw.get("portal_date_format", "%d/%m/%Y"),
         browser_channel=raw.get("browser_channel", "chrome"),
         browser_profile_dir=_resolve(raw.get("browser_profile_dir", "browser_profile")),
@@ -57,3 +54,12 @@ def load_settings(path: Path) -> Settings:
 def _resolve(value: str) -> Path:
     p = Path(value)
     return p if p.is_absolute() else PROJECT_ROOT / p
+
+
+# 'users' may be a list of SAP names or a mapping SAP name -> personal folder name
+def _parse_users(value: object) -> dict[str, str | None]:
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return {str(k).strip().upper(): (str(v).strip() if v else None) for k, v in value.items()}
+    return {str(u).strip().upper(): None for u in value}  # type: ignore[union-attr]

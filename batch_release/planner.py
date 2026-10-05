@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from .config import Settings
-from .folder_finder import FolderIndex, list_attachments
+from .folder_finder import FolderIndex, select_attachments
 from .license import LicenseFormatError, to_portal_license
 
 READY = "READY"
@@ -29,6 +29,7 @@ class Request:
     files: list[Path] = field(default_factory=list)
     status: str = READY
     message: str = ""
+    attach_rule: str = ""
 
     # Key used to recognise a request that was already filed in an earlier run
     @property
@@ -45,7 +46,7 @@ def build_plan(excel_path: Path, settings: Settings, already_filed: set[str]) ->
     if missing:
         raise ValueError(f"columns not found in {excel_path.name}: {missing}")
 
-    index = FolderIndex(settings.attachments_root, settings.folder_search_depth)
+    indexes: dict[str, FolderIndex | str] = {}
     seen: dict[str, int] = {}
     plan: list[Request] = []
 
@@ -69,12 +70,12 @@ def build_plan(excel_path: Path, settings: Settings, already_filed: set[str]) ->
             decided_by=decided_by,
         )
         plan.append(req)
-        _validate(req, settings, index, seen, already_filed)
+        _validate(req, _index_for(decided_by, settings, indexes), seen, already_filed)
     return plan
 
 
 # Fill in license/folder/files and mark the row READY, SKIPPED or NEEDS_ATTENTION
-def _validate(req: Request, settings: Settings, index: FolderIndex,
+def _validate(req: Request, index: FolderIndex | str,
               seen: dict[str, int], already_filed: set[str]) -> None:
     try:
         req.license = to_portal_license(req.license_raw)
@@ -92,6 +93,9 @@ def _validate(req: Request, settings: Settings, index: FolderIndex,
         return
     seen[req.key] = req.excel_row
 
+    if isinstance(index, str):  # the user's folder could not be scanned
+        req.status, req.message = NEEDS_ATTENTION, index
+        return
     match = index.find(req.batch, req.lot_created)
     if match.folder is None:
         listed = "; ".join(str(c) for c in match.candidates)
@@ -99,9 +103,22 @@ def _validate(req: Request, settings: Settings, index: FolderIndex,
         req.message = match.problem + (f" [{listed}]" if listed else "")
         return
     req.folder = match.folder
-    req.files = list_attachments(match.folder, settings.attach_extensions, settings.attach_recursive)
-    if not req.files:
-        req.status, req.message = NEEDS_ATTENTION, f"folder has no attachable files: {match.folder}"
+    choice = select_attachments(match.folder, req.batch)
+    req.files, req.attach_rule = choice.files, choice.rule
+    if choice.problem:
+        req.status, req.message = NEEDS_ATTENTION, choice.problem
+
+
+# Scan each user's personal folder once (root/<folder name>); a scan error is kept as a message
+def _index_for(user: str, settings: Settings, cache: dict[str, "FolderIndex | str"]) -> "FolderIndex | str":
+    if user not in cache:
+        sub = settings.users.get(user)
+        root = settings.attachments_root / sub if sub else settings.attachments_root
+        try:
+            cache[user] = FolderIndex(root, settings.folder_search_depth)
+        except FileNotFoundError:
+            cache[user] = f"folder for user {user} not found: {root}"
+    return cache[user]
 
 
 # Excel cells arrive as text like '2026-04-15 00:00:00'; anything unparsable becomes None

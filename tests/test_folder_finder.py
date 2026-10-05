@@ -1,7 +1,7 @@
 from datetime import date
 from pathlib import Path
 
-from batch_release.folder_finder import FolderIndex, dates_in_name, name_contains_batch
+from batch_release.folder_finder import FolderIndex, dates_in_name, name_contains_batch, select_attachments
 
 
 def _make(root: Path, *names: str) -> None:
@@ -48,3 +48,40 @@ def test_nested_match_counts_once(tmp_path: Path) -> None:
 def test_missing_folder(tmp_path: Path) -> None:
     m = FolderIndex(tmp_path, 4).find("ZZZ", None)
     assert m.folder is None and "no folder" in m.problem
+
+
+def _files(folder: Path, *names: str) -> None:
+    for n in names:
+        p = folder / n
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+
+
+def test_moh_sub_wins(tmp_path: Path) -> None:
+    _files(tmp_path, "MOH_SUB/a.pdf", "MOH_SUB/b.pdf", "OK 3rd P replenish.pdf", "report-1.pdf")
+    c = select_attachments(tmp_path, "44216")
+    assert c.rule == "MOH_SUB" and sorted(p.name for p in c.files) == ["a.pdf", "b.pdf"] and not c.problem
+
+
+def test_replenish_plus_batch_file(tmp_path: Path) -> None:
+    _files(tmp_path, "OK 3rd P replenish 1.pdf", "x OK 3rd P replenish 2.pdf", "44216.pdf", "COA.pdf", "report-x.pdf")
+    c = select_attachments(tmp_path, "44216")
+    assert c.rule == "OK 3rd P replenish" and not c.problem
+    assert sorted(p.name for p in c.files) == ["44216.pdf", "OK 3rd P replenish 1.pdf", "x OK 3rd P replenish 2.pdf"]
+
+
+def test_replenish_without_batch_file_is_flagged(tmp_path: Path) -> None:
+    _files(tmp_path, "OK 3rd P replenish 1.pdf")
+    assert "no file named after batch" in select_attachments(tmp_path, "44216").problem
+
+
+def test_report_plus_coa(tmp_path: Path) -> None:
+    _files(tmp_path, "report-44216.pdf", "COA 44216.pdf", "checklist.pdf")
+    c = select_attachments(tmp_path, "44216")
+    assert c.rule == "report- + COA" and sorted(p.name for p in c.files) == ["COA 44216.pdf", "report-44216.pdf"]
+
+
+def test_nothing_matches_is_flagged(tmp_path: Path) -> None:
+    _files(tmp_path, "checklist.pdf")
+    c = select_attachments(tmp_path, "44216")
+    assert c.files == [] and c.problem
