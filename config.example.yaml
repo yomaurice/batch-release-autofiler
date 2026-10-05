@@ -20,7 +20,6 @@ portal_date_format: "%d/%m/%Y"
 
 # chrome = your installed Google Chrome, msedge = Microsoft Edge
 browser_channel: chrome
-browser_profile_dir: browser_profile   # keeps you logged in between runs; never commit it
 results_dir: results
 
 # SAP column names (change only if the export layout changes)

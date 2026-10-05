@@ -40,26 +40,24 @@ class Portal:
         self.selectors = {**DEFAULT_SELECTORS, **settings.selectors}
         self.shots_dir = settings.results_dir / "screenshots"
         self._pw = None
+        self._browser = None
         self.context: BrowserContext | None = None
         self.page: Page | None = None
 
     def __enter__(self) -> "Portal":
         self._pw = sync_playwright().start()
-        self.settings.browser_profile_dir.mkdir(parents=True, exist_ok=True)
-        # A persistent profile keeps the session cookies, so 2FA is needed only when the site expires it
-        self.context = self._pw.chromium.launch_persistent_context(
-            str(self.settings.browser_profile_dir),
-            channel=self.settings.browser_channel,
-            headless=False,
-            locale="he-IL",
-            viewport={"width": 1500, "height": 950},
-        )
-        self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
+        # A fresh, cookie-less session every run: the MOH login gateway (idpotp) gets stuck on stale
+        # session cookies from an earlier run, and 2FA is needed each run anyway
+        self._browser = self._pw.chromium.launch(channel=self.settings.browser_channel, headless=False)
+        self.context = self._browser.new_context(locale="he-IL", viewport={"width": 1500, "height": 950})
+        self.page = self.context.new_page()
         return self
 
     def __exit__(self, *exc: object) -> None:
         if self.context:
             self.context.close()
+        if self._browser:
+            self._browser.close()
         if self._pw:
             self._pw.stop()
 
@@ -70,6 +68,8 @@ class Portal:
         print("\n>>> Log in in the browser window (password + 2FA).")
         while True:
             input(">>> Press Enter here once you see the submitted-batches list... ")
+            if "qpbatchrelease" in page.url and "/batch-release" not in page.url:
+                page.goto(self.settings.portal_url)  # login sometimes lands on the site root
             if self._open_form(timeout_ms=8000):
                 print(">>> Form opened, starting.\n")
                 return

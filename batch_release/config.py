@@ -27,7 +27,6 @@ class Settings:
     folder_search_depth: int = 4
     portal_date_format: str = "%d/%m/%Y"
     browser_channel: str = "chrome"
-    browser_profile_dir: Path = PROJECT_ROOT / "browser_profile"
     results_dir: Path = PROJECT_ROOT / "results"
     selectors: dict[str, str] = field(default_factory=dict)
 
@@ -44,7 +43,6 @@ def load_settings(path: Path) -> Settings:
         folder_search_depth=int(raw.get("folder_search_depth", 4)),
         portal_date_format=raw.get("portal_date_format", "%d/%m/%Y"),
         browser_channel=raw.get("browser_channel", "chrome"),
-        browser_profile_dir=_resolve(raw.get("browser_profile_dir", "browser_profile")),
         results_dir=_resolve(raw.get("results_dir", "results")),
         selectors=raw.get("selectors") or {},
     )
