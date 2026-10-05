@@ -74,8 +74,8 @@ Every check and run is saved as an Excel file in `results\` (**Open results fold
 ### Command line (same engine)
 
 ```bat
-.venv\Scripts\python run.py plan   "....10.26.XLSX"
-.venv\Scripts\python run.py submit "....10.26.XLSX" --mode dry-run|confirm|auto [--limit 1] [--rows 4 7]
+.venv\Scripts\python run.py plan   "...\05.10.26.XLSX"
+.venv\Scripts\python run.py submit "...\05.10.26.XLSX" --mode dry-run|confirm|auto [--limit 1] [--rows 4 7]
 ```
 
 ## Testing without the real share
