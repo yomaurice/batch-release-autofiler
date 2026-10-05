@@ -1,0 +1,99 @@
+"""Command-line entry point: plan / submit / inspect."""
+import argparse
+import sys
+import time
+from pathlib import Path
+
+from batch_release.config import PROJECT_ROOT, load_settings
+from batch_release.planner import READY, build_plan
+from batch_release.report import load_ledger, summarize, write_report
+
+MODES = ("dry-run", "confirm", "auto")
+
+
+# Resolve the Excel export, print a summary and write the plan workbook
+def cmd_plan(args: argparse.Namespace) -> list:
+    settings = load_settings(args.config)
+    plan = build_plan(args.excel, settings, load_ledger(settings.results_dir))
+    if args.rows:
+        wanted = set(args.rows)
+        plan = [r for r in plan if r.excel_row in wanted]
+    path = write_report(settings.results_dir, plan, "plan")
+    print(f"\nRows for users {settings.users or '(all users)'}: {len(plan)}")
+    for status, count in summarize(plan).items():
+        print(f"  {status:<16} {count}")
+    print(f"Plan written to: {path}\n")
+    return plan
+
+
+# Build the plan, then fill (and depending on mode, send) every READY request
+def cmd_submit(args: argparse.Namespace) -> None:
+    from batch_release.portal import Portal  # Playwright is only needed for this command
+
+    settings = load_settings(args.config)
+    plan = cmd_plan(args)
+    ready = [r for r in plan if r.status == READY]
+    if args.limit:
+        ready = ready[: args.limit]
+    if not ready:
+        print("Nothing is READY to file — open the plan workbook to see why.")
+        return
+
+    print(f"Mode: {args.mode}  —  {len(ready)} request(s) will be processed.")
+    if args.mode == "auto" and input(">>> Type SEND to file them all without asking: ").strip() != "SEND":
+        print("Cancelled.")
+        return
+
+    with Portal(settings) as portal:
+        portal.wait_for_login()
+        for n, req in enumerate(ready, 1):
+            print(f"[{n}/{len(ready)}] row {req.excel_row}  batch {req.batch}  {req.product}")
+            portal.file_request(req, args.mode, args.excel.name)
+            print(f"        -> {req.status}  {req.message}")
+            time.sleep(args.pause)
+
+    path = write_report(settings.results_dir, plan, f"results_{args.mode}")
+    print(f"\nDone. Results written to: {path}")
+
+
+# Open the portal, let you log in, and dump the form's controls for selector calibration
+def cmd_inspect(args: argparse.Namespace) -> None:
+    from batch_release.portal import Portal
+
+    settings = load_settings(args.config)
+    with Portal(settings) as portal:
+        page = portal._page()
+        page.goto(settings.portal_url)
+        input(">>> Log in, open the new-request form, then press Enter to capture its fields... ")
+        out = portal.inspect_form(settings.results_dir / "form_controls.json")
+        page.screenshot(path=str(settings.results_dir / "form_controls.png"), full_page=True)
+    print(f"Form controls written to: {out}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="File MOH batch-release requests from an SAP export.")
+    parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "config.yaml")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    for name, fn, help_text in (("plan", cmd_plan, "check the Excel and folders, send nothing"),
+                                ("submit", cmd_submit, "fill the portal form for every READY row")):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("excel", type=Path, help="SAP export (.xlsx)")
+        p.add_argument("--rows", type=int, nargs="*", help="only these Excel row numbers")
+        p.set_defaults(func=fn)
+        if name == "submit":
+            p.add_argument("--mode", choices=MODES, default="dry-run")
+            p.add_argument("--limit", type=int, default=0, help="process at most N requests")
+            p.add_argument("--pause", type=float, default=2.0, help="seconds between requests")
+
+    p = sub.add_parser("inspect", help="capture the form's fields to calibrate selectors")
+    p.set_defaults(func=cmd_inspect)
+
+    args = parser.parse_args()
+    if not args.config.exists():
+        sys.exit(f"Config not found: {args.config}  (copy config.example.yaml to config.yaml)")
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

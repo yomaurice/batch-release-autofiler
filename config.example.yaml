@@ -1,0 +1,37 @@
+# Copy this file to config.yaml and edit it. config.yaml is not committed to git.
+
+portal_url: https://qpbatchrelease.health.gov.il/batch-release
+
+# Root folder searched for '<batch> ... <lot-created date>' attachment folders.
+# On the work PC this is the real share (e.g. \\server\QA\Batch Release); for testing use the fake tree
+# made by: python tools/make_test_tree.py <export.xlsx>
+attachments_root: test_data/attachments
+folder_search_depth: 4          # how many folder levels below the root are searched
+attach_extensions: [".pdf"]     # file types uploaded from the batch folder ([] = all files)
+attach_recursive: false         # also upload files from sub-folders of the batch folder
+
+# Only rows whose "Usage dec. made by" is one of these SAP users are filed
+users:
+  - EXAMPLEUSER01
+
+# Date format typed into the portal's date fields
+portal_date_format: "%d/%m/%Y"
+
+# chrome = your installed Google Chrome, msedge = Microsoft Edge
+browser_channel: chrome
+browser_profile_dir: browser_profile   # keeps you logged in between runs; never commit it
+results_dir: results
+
+# SAP column names (change only if the export layout changes)
+columns:
+  batch: Batch
+  mfg_date: MFG Date
+  expiry_date: Expiry Date
+  license: GI External License number
+  lot_created: Lot created on
+  decided_by: Usage dec. made by
+  product: Short text for inspection object
+
+# Override how form elements are found, after running `python run.py inspect`.
+# Prefix label: / text: / role:, or give a CSS selector, e.g.  batch_number: "input[formcontrolname=batchNumber]"
+selectors: {}

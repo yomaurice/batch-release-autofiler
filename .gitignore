@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Local config, login session, generated data — never commit
+config.yaml
+browser_profile/
+results/
+test_data/
+*.xlsx
+*.XLSX
