@@ -22,7 +22,7 @@ DEFAULT_SELECTORS = {
     "show_product_button": "text:הצג תכשיר",
     "add_file_button": "text:הוסף קובץ",
     "file_input": "input[type=file]",
-    "declaration_checkbox": "role:checkbox",
+    "declaration_checkbox": "mat-checkbox",
     "submit_button": "text:שלח בקשה",
 }
 
@@ -48,8 +48,10 @@ class Portal:
         self._pw = sync_playwright().start()
         # A fresh, cookie-less session every run: the MOH login gateway (idpotp) gets stuck on stale
         # session cookies from an earlier run, and 2FA is needed each run anyway
-        self._browser = self._pw.chromium.launch(channel=self.settings.browser_channel, headless=False)
-        self.context = self._browser.new_context(locale="he-IL", viewport={"width": 1500, "height": 950})
+        # Maximized window and no fixed viewport, so the page always fits your screen (and its scaling)
+        self._browser = self._pw.chromium.launch(
+            channel=self.settings.browser_channel, headless=False, args=["--start-maximized"])
+        self.context = self._browser.new_context(locale="he-IL", no_viewport=True)
         self.page = self.context.new_page()
         return self
 
@@ -91,7 +93,7 @@ class Portal:
             page.wait_for_load_state("networkidle")
 
             self._attach_files(req.files)
-            self._locate(self.selectors["declaration_checkbox"]).last.check()
+            self._tick_declaration()
             shot = self._screenshot(req, "filled")
 
             if mode == "dry-run":
@@ -110,7 +112,8 @@ class Portal:
             append_ledger(self.settings.results_dir, req, excel_name, reference)
         except Exception as exc:  # one bad row must not stop the whole batch
             shot = self._screenshot(req, "error")
-            req.status, req.message = FAILED, f"{type(exc).__name__}: {exc} (screenshot: {shot.name})"
+            first_line = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
+            req.status, req.message = FAILED, f"{type(exc).__name__}: {first_line} (screenshot: {shot.name})"
 
     # Dump every input/button on the current page, used to calibrate the selectors
     def inspect_form(self, out_path: Path) -> Path:
@@ -176,6 +179,17 @@ class Portal:
         field.fill(value.strftime(self.settings.portal_date_format))
         field.press("Escape")
         field.press("Tab")
+
+    # The declaration is an Angular Material checkbox: the real <input> is hidden under the styled box,
+    # so click the box itself and confirm it really got ticked
+    def _tick_declaration(self) -> None:
+        box = self._locate(self.selectors["declaration_checkbox"]).last
+        box.scroll_into_view_if_needed()
+        tick = box.locator("input[type=checkbox]")
+        if not tick.is_checked():
+            box.locator("label").first.click()
+        if not tick.is_checked():
+            raise RuntimeError("declaration checkbox did not get ticked")
 
     # Prefer the hidden <input type=file>; fall back to clicking 'add file' and answering the dialog
     def _attach_files(self, files: list[Path]) -> None:
