@@ -11,9 +11,10 @@ from .config import Settings
 from .planner import Request
 from .report import append_ledger
 
-# How each form element is found. Prefix 'label:' / 'text:' / 'role:', anything else is CSS/XPath.
+# How each form element is found. Prefix 'label:' / 'text:' (contains) / 'exact:' / 'role:', else CSS/XPath.
 # These are first guesses from the form's Hebrew labels; override them under 'selectors' in config.yaml.
 DEFAULT_SELECTORS = {
+    "registered_product_button": "exact:אצווה לתכשיר רשום",
     "batch_number": "label:מספר אצווה",
     "mfg_date": "label:תאריך ייצור אצווה",
     "expiry_date": "label:תפוגת אצווה",
@@ -62,24 +63,24 @@ class Portal:
         if self._pw:
             self._pw.stop()
 
-    # Open the portal and wait until you have logged in and the request form is visible
+    # Open the portal and wait until you have logged in and the request form can be opened
     def wait_for_login(self) -> None:
         page = self._page()
         page.goto(self.settings.portal_url)
-        print("\n>>> Log in in the browser window (password + 2FA) and open the new-request form.")
+        print("\n>>> Log in in the browser window (password + 2FA).")
         while True:
-            input(">>> Press Enter here once the empty form is on screen... ")
-            if self._form_ready(timeout_ms=3000):
-                print(">>> Form detected, starting.\n")
+            input(">>> Press Enter here once you see the submitted-batches list... ")
+            if self._open_form(timeout_ms=8000):
+                print(">>> Form opened, starting.\n")
                 return
-            print("    The form was not found yet (wrong page, or selectors need calibrating — see README).")
+            print("    Could not open the form yet (still logging in, or selectors need calibrating — see README).")
 
     # Fill the form for one request; send it only if mode allows
     def file_request(self, req: Request, mode: str, excel_name: str) -> None:
         page = self._page()
         try:
             page.goto(self.settings.portal_url)
-            if not self._form_ready(timeout_ms=20000):
+            if not self._open_form(timeout_ms=20000):
                 raise RuntimeError("form did not load — session may have expired, log in again")
 
             self._fill(self.selectors["batch_number"], req.batch)
@@ -137,9 +138,24 @@ class Portal:
             return page.get_by_label(value, exact=False)
         if kind == "text" and value:
             return page.get_by_text(value, exact=False)
+        if kind == "exact" and value:
+            return page.get_by_text(value, exact=True)
         if kind == "role" and value:
             return page.get_by_role(value)  # type: ignore[arg-type]
         return page.locator(spec)
+
+    # After login the portal shows the submitted-batches list; the form opens from the
+    # 'אצווה לתכשיר רשום' button (not the 'תקנה 29' one next to it)
+    def _open_form(self, timeout_ms: int) -> bool:
+        if self._form_ready(timeout_ms=2000):
+            return True
+        button = self._locate(self.selectors["registered_product_button"]).first
+        try:
+            button.wait_for(state="visible", timeout=timeout_ms)
+            button.click()
+        except Exception:
+            return False
+        return self._form_ready(timeout_ms=timeout_ms)
 
     def _form_ready(self, timeout_ms: int) -> bool:
         try:
