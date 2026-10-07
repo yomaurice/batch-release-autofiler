@@ -3,11 +3,9 @@ import argparse
 import sys
 from pathlib import Path
 
-from batch_release.config import PROJECT_ROOT, load_settings
+from batch_release.config import MODES, PROJECT_ROOT, load_settings
 from batch_release.planner import READY, build_plan
 from batch_release.report import load_ledger, summarize, write_report
-
-MODES = ("dry-run", "confirm", "auto")
 
 
 # Resolve the Excel export, print a summary and write the plan workbook
@@ -32,6 +30,7 @@ def cmd_submit(args: argparse.Namespace) -> None:
     from batch_release.runner import file_requests
 
     settings = load_settings(args.config)
+    args.mode = args.mode or settings.default_mode
     profile = settings.users.get((args.user or "").upper())
     if not profile:
         sys.exit(f"submit needs --user, one of: {', '.join(settings.users)}")
@@ -86,7 +85,7 @@ def main() -> None:
         p.add_argument("--user", help="SAP user filing (e.g. DSABAG01); only their rows are used")
         p.set_defaults(func=fn)
         if name == "submit":
-            p.add_argument("--mode", choices=MODES, default="dry-run")
+            p.add_argument("--mode", choices=MODES, help="default: default_mode in config.yaml")
             p.add_argument("--limit", type=int, default=0, help="process at most N requests")
             p.add_argument("--pause", type=float, default=2.0, help="seconds between requests")
 

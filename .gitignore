@@ -10,3 +10,6 @@ results/
 test_data/
 *.xlsx
 *.XLSX
+
+# Standalone build (toolsuild_exe.bat)
+build_out/

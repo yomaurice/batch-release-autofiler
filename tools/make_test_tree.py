@@ -22,7 +22,8 @@ _BAD_CHARS = re.compile(r'[\\/:*?"<>|]')
 _SCENARIOS: list[tuple[str, list[str]]] = [
     ("moh_sub", ["MOH_SUB/MOH package 1.pdf", "MOH_SUB/MOH package 2.pdf", "COA {batch}.pdf", "internal notes.pdf"]),
     ("replenish", ["OK 3rd P replenish {batch}.pdf", "OK 3rd P replenish annex.pdf", "{batch}.pdf", "other.pdf"]),
-    ("report", ["report-{batch}.pdf", "COA {batch}.pdf", "{batch}.pdf", "{batch} draft.pdf", "checklist.pdf"]),
+    ("report", ["report-{batch}.pdf", "COA {batch} old.pdf", "COA {batch}.pdf", "{batch}.pdf", "checklist.pdf"]),
+    ("logger", ["Data Logger {batch}.pdf", "data logger annex.pdf", "COA {batch} old.pdf", "COA {batch}.pdf"]),
     ("nothing", ["checklist.pdf", "scan001.pdf"]),
 ]
 

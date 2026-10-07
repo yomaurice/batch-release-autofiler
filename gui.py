@@ -1,18 +1,22 @@
 """Desktop UI for the Batch Release Autofiler (double-click start.bat)."""
 import os
 import queue
+import shutil
 import threading
 import traceback
+from datetime import datetime
 from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
 
-from batch_release.config import PROJECT_ROOT, Settings, UserProfile, load_settings
+from batch_release.config import BUNDLE_ROOT, PROJECT_ROOT, Settings, UserProfile, load_settings
+from batch_release.config_store import save_changes
 from batch_release.credentials import delete_login, get_login, save_login
 from batch_release.planner import NEEDS_ATTENTION, READY, SKIPPED, Request, build_plan
-from batch_release.report import load_ledger, summarize, write_report
+from batch_release.report import (load_ledger, refresh_submissions_log, submissions_log_path, summarize,
+                                   write_report)
 
 CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 
@@ -149,6 +153,243 @@ class LoginDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class SettingsDialog(ctk.CTkToplevel):
+    """Edit config.yaml through a form; saving writes the file (its comments are kept)."""
+
+    COLUMN_LABELS = {"batch": "Batch", "mfg_date": "MFG date", "expiry_date": "Expiry date",
+                     "license": "License number", "lot_created": "Lot created on", "decided_by": "Usage decision by",
+                     "product": "Product text", "ud_code": "UD code"}
+
+    def __init__(self, master: "App", settings: Settings) -> None:
+        super().__init__(master, fg_color=BG)
+        self.saved = False
+        self.title("Settings")
+        height = min(820, self.winfo_screenheight() - 110)  # keep the Save bar on small / scaled screens
+        self.geometry(f"900x{height}+{max(0, (self.winfo_screenwidth() - 900) // 2)}+20")
+        self.minsize(760, 480)
+        self.transient(master)
+
+        bar = ctk.CTkFrame(self, fg_color=CARD, corner_radius=0, height=70)
+        bar.pack(fill="x", side="bottom")
+        _button(bar, "Save", self._save, primary=True, width=120).pack(side="right", padx=(8, 24), pady=14)
+        _button(bar, "Cancel", self.destroy, width=100).pack(side="right", pady=14)
+        _button(bar, "Open config file", lambda: _open(CONFIG_PATH), width=150).pack(side="left", padx=(24, 8))
+        _button(bar, "Test browser", self._test_browser, width=130).pack(side="left")
+
+        body = ctk.CTkScrollableFrame(self, fg_color=BG)
+        body.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+
+        # Run modes
+        card = self._section(body, "Run modes", "Choose which modes appear in the app, and which one is "
+                                                "selected when it opens. Once things are stable, offer only "
+                                                "'Send all'.")
+        self.mode_switches: dict[str, ctk.CTkSwitch] = {}
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=20, pady=(4, 0))
+        for label, mode in MODES.items():
+            sw = ctk.CTkSwitch(row, text=label, font=(FONT, 13), text_color=TEXT, progress_color=ACCENT,
+                               command=self._refresh_default_mode)
+            sw.pack(side="left", padx=(0, 28))
+            if mode in settings.modes:
+                sw.select()
+            self.mode_switches[mode] = sw
+        line = ctk.CTkFrame(card, fg_color="transparent")
+        line.pack(fill="x", padx=20, pady=(14, 18))
+        _field_label(line, "Selected when the app opens").pack(side="left", padx=(0, 14))
+        self.default_mode = ctk.CTkSegmentedButton(line, values=list(MODES), font=(FONT, 13), height=36,
+                                                   selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
+                                                   unselected_color=GHOST, unselected_hover_color=GHOST_HOVER,
+                                                   text_color=TEXT, fg_color=GHOST, corner_radius=10)
+        self.default_mode.pack(side="left")
+        self.default_mode.set(_mode_label(settings.default_mode))
+        self._refresh_default_mode()
+
+        # Folders and browser
+        card = self._section(body, "Folders and browser", "")
+        self.attachments_root = self._path_row(card, "Attachments root (S: drive)", settings.attachments_root)
+        self.results_dir = self._path_row(card, "Results folder", settings.results_dir)
+        line = ctk.CTkFrame(card, fg_color="transparent")
+        line.pack(fill="x", padx=20, pady=(10, 18))
+        _field_label(line, "Folder levels searched").pack(side="left", padx=(0, 10))
+        self.depth = ctk.CTkOptionMenu(line, values=[str(n) for n in range(1, 9)], width=70, height=34,
+                                       font=(FONT, 13), fg_color=GHOST, button_color=GHOST_HOVER,
+                                       button_hover_color=BORDER, text_color=TEXT, corner_radius=10)
+        self.depth.set(str(settings.folder_search_depth))
+        self.depth.pack(side="left")
+        _field_label(line, "Browser").pack(side="left", padx=(36, 10))
+        self.browser = ctk.CTkSegmentedButton(line, values=["Chrome", "Edge"], font=(FONT, 13), height=34,
+                                              selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
+                                              unselected_color=GHOST, unselected_hover_color=GHOST_HOVER,
+                                              text_color=TEXT, fg_color=GHOST, corner_radius=10)
+        self.browser.set("Edge" if settings.browser_channel == "msedge" else "Chrome")
+        self.browser.pack(side="left")
+
+        # People
+        card = self._section(body, "People who file",
+                             "SAP user = 'Usage dec. made by' in the export. Portal name = the name in the "
+                             "portal's 'שלום, …' greeting, used to check who is logged in.")
+        self.users_frame = ctk.CTkFrame(card, fg_color="transparent")
+        self.users_frame.pack(fill="x", padx=20)
+        for col, title in enumerate(("SAP user", "Name shown", "Folder under attachments root", "Portal name", "")):
+            ctk.CTkLabel(self.users_frame, text=title, font=(FONT, 11, "bold"), text_color=MUTED,
+                         anchor="w").grid(row=0, column=col, sticky="w", padx=4)
+        for col, weight in enumerate((2, 2, 3, 2, 0)):
+            self.users_frame.grid_columnconfigure(col, weight=weight)
+        self.user_rows: list[list[ctk.CTkBaseClass]] = []
+        self._next_user_row = 1
+        for p in settings.users.values():
+            self._add_user_row(p.sap_user, p.display_name, p.folder or "", p.portal_name)
+        _button(card, "+  Add person", self._add_user_row, width=130, height=34).pack(anchor="w", padx=20,
+                                                                                    pady=(8, 18))
+
+        # Advanced
+        card = self._section(body, "Advanced", "Column names in the SAP export, and the portal address. Change "
+                                               "only if the export or the portal changes.")
+        grid = ctk.CTkFrame(card, fg_color="transparent")
+        grid.pack(fill="x", padx=20, pady=(0, 18))
+        grid.grid_columnconfigure((1, 3), weight=1)
+        self.columns: dict[str, ctk.CTkEntry] = {}
+        for i, (key, label) in enumerate(self.COLUMN_LABELS.items()):
+            ctk.CTkLabel(grid, text=label, font=(FONT, 12), text_color=TEXT, anchor="w").grid(
+                row=i // 2, column=(i % 2) * 2, sticky="w", padx=(0 if i % 2 == 0 else 20, 8), pady=4)
+            entry = self._entry(grid, settings.columns.get(key, ""))
+            entry.grid(row=i // 2, column=(i % 2) * 2 + 1, sticky="ew", pady=4)
+            self.columns[key] = entry
+        last = (len(self.COLUMN_LABELS) + 1) // 2
+        ctk.CTkLabel(grid, text="Portal address", font=(FONT, 12), text_color=TEXT, anchor="w").grid(
+            row=last, column=0, sticky="w", pady=(12, 4))
+        self.portal_url = self._entry(grid, settings.portal_url)
+        self.portal_url.grid(row=last, column=1, columnspan=3, sticky="ew", pady=(12, 4))
+
+        self.after(150, self.grab_set)
+
+    # ---------- building blocks ----------
+
+    def _section(self, master: ctk.CTkBaseClass, title: str, hint: str) -> ctk.CTkFrame:
+        card = _card(master)
+        card.pack(fill="x", padx=12, pady=8)
+        ctk.CTkLabel(card, text=title, font=(FONT, 16, "bold"), text_color=TEXT).pack(anchor="w", padx=20,
+                                                                                       pady=(16, 2))
+        if hint:
+            ctk.CTkLabel(card, text=hint, font=(FONT, 12), text_color=MUTED, justify="left", wraplength=780,
+                         anchor="w").pack(anchor="w", padx=20, pady=(0, 8))
+        return card
+
+    def _entry(self, master: ctk.CTkBaseClass, value: str, placeholder: str = "") -> ctk.CTkEntry:
+        entry = ctk.CTkEntry(master, placeholder_text=placeholder, height=34, corner_radius=8, border_width=1,
+                             border_color=BORDER, fg_color="#fbfcfe", text_color=TEXT, font=(FONT, 13))
+        if value:
+            entry.insert(0, value)
+        return entry
+
+    def _path_row(self, master: ctk.CTkBaseClass, label: str, value: Path) -> ctk.CTkEntry:
+        row = ctk.CTkFrame(master, fg_color="transparent")
+        row.pack(fill="x", padx=20, pady=4)
+        ctk.CTkLabel(row, text=label, font=(FONT, 12, "bold"), text_color=TEXT, width=210, anchor="w").pack(
+            side="left")
+        entry = self._entry(row, _display_path(value))
+        entry.pack(side="left", fill="x", expand=True)
+
+        def browse() -> None:
+            chosen = filedialog.askdirectory(parent=self, initialdir=str(value if value.exists() else Path.home()))
+            if chosen:
+                entry.delete(0, "end")
+                entry.insert(0, _display_path(Path(chosen)))
+        _button(row, "Browse…", browse, width=90, height=34).pack(side="left", padx=(8, 0))
+        return entry
+
+    def _add_user_row(self, sap: str = "", name: str = "", folder: str = "", portal: str = "") -> None:
+        r = self._next_user_row
+        self._next_user_row += 1
+        cells: list[ctk.CTkBaseClass] = [self._entry(self.users_frame, v, ph) for v, ph in
+                                         ((sap, "e.g. DSABAG01"), (name, "e.g. Dudi"), (folder, "e.g. Dudi"),
+                                          (portal, "e.g. דוד"))]
+        for c, cell in enumerate(cells):
+            cell.grid(row=r, column=c, sticky="ew", padx=4, pady=3)
+        cells[3].configure(justify="right")
+        widgets = list(cells)
+        remove = ctk.CTkButton(self.users_frame, text="✕", width=34, height=34, corner_radius=8, fg_color=GHOST,
+                               hover_color="#fee2e2", text_color=MUTED, font=(FONT, 13),
+                               command=lambda: self._remove_user_row(widgets))
+        remove.grid(row=r, column=4, padx=4, pady=3)
+        widgets.append(remove)
+        self.user_rows.append(widgets)
+
+    def _remove_user_row(self, widgets: list[ctk.CTkBaseClass]) -> None:
+        for w in widgets:
+            w.destroy()
+        self.user_rows.remove(widgets)
+
+    # Uses the saved settings (browser, portal address); Chrome opens for a few seconds
+    def _test_browser(self) -> None:
+        from batch_release.portal import browser_selftest  # loads Playwright only when needed
+        self.configure(cursor="watch")
+        self.update()
+        try:
+            messagebox.showinfo("Browser test", "Works: " + browser_selftest(load_settings(CONFIG_PATH)),
+                                parent=self)
+        except Exception as exc:
+            messagebox.showerror("Browser test", f"The app could not open the browser:\n{type(exc).__name__}: "
+                                                 f"{str(exc).strip().splitlines()[0] if str(exc).strip() else ''}",
+                                 parent=self)
+        finally:
+            self.configure(cursor="")
+
+    def _refresh_default_mode(self) -> None:
+        offered = [label for label, mode in MODES.items() if self.mode_switches[mode].get()]
+        self.default_mode.configure(values=offered or ["—"])
+        if self.default_mode.get() not in offered:
+            self.default_mode.set(offered[0] if offered else "—")
+
+    # ---------- save ----------
+
+    def _save(self) -> None:
+        modes = [mode for mode, sw in self.mode_switches.items() if sw.get()]
+        if not modes:
+            messagebox.showwarning("Run modes", "Turn on at least one mode.", parent=self)
+            return
+        users: dict[str, dict[str, str]] = {}
+        for cells in self.user_rows:
+            sap, name, folder, portal = (c.get().strip() for c in cells[:4])  # type: ignore[attr-defined]
+            if not (sap or name or folder or portal):
+                continue
+            if not sap:
+                messagebox.showwarning("People", f"Fill in the SAP user for '{name or folder}'.", parent=self)
+                return
+            if sap.upper() in users:
+                messagebox.showwarning("People", f"{sap.upper()} is listed twice.", parent=self)
+                return
+            users[sap.upper()] = {"display_name": name, "folder": folder, "portal_name": portal}
+        missing_portal = [s for s, u in users.items() if not u["portal_name"]]
+        if missing_portal and not messagebox.askyesno(
+                "Portal name missing", f"No portal name for {', '.join(missing_portal)}: their runs will be "
+                                       "blocked after login. Save anyway?", parent=self):
+            return
+        root = self.attachments_root.get().strip().strip('"')
+        if not root:
+            messagebox.showwarning("Folders", "Set the attachments root.", parent=self)
+            return
+        changes = {
+            "modes": modes,
+            "default_mode": MODES[self.default_mode.get()],
+            "attachments_root": root,
+            "results_dir": self.results_dir.get().strip().strip('"') or "results",
+            "folder_search_depth": int(self.depth.get()),
+            "browser_channel": "msedge" if self.browser.get() == "Edge" else "chrome",
+            "users": users,
+            "columns": {k: e.get().strip() for k, e in self.columns.items() if e.get().strip()},
+            "portal_url": self.portal_url.get().strip(),
+        }
+        try:
+            save_changes(CONFIG_PATH, changes)
+            load_settings(CONFIG_PATH)  # make sure what was written reads back
+        except Exception as exc:
+            messagebox.showerror("Could not save", f"{type(exc).__name__}: {exc}", parent=self)
+            return
+        self.saved = True
+        self.destroy()
+
+
 class App(ctk.CTk):
     """Main window: choose who files, pick the SAP export, check it, then fill/send the requests."""
 
@@ -169,6 +410,7 @@ class App(ctk.CTk):
         self.stop_requested = threading.Event()
         self.prompts = GuiPrompts(self)
         self._ui_queue: "queue.Queue[Callable[[], None]]" = queue.Queue()
+        self._mode_ready = False
 
         self._style_table()
         self._build()
@@ -191,7 +433,7 @@ class App(ctk.CTk):
 
         right = ctk.CTkFrame(header, fg_color="transparent")
         right.pack(side="right", padx=24)
-        _button(right, "⚙  Settings", lambda: _open(CONFIG_PATH), width=110, dark=True).pack(side="right")
+        _button(right, "⚙  Settings", self._edit_settings, width=110, dark=True).pack(side="right")
         _button(right, "Login details", self._edit_login, width=120, dark=True).pack(side="right", padx=8)
         self.login_badge = ctk.CTkLabel(right, text="", font=(FONT, 12), corner_radius=12, height=26, padx=10)
         self.login_badge.pack(side="right", padx=8)
@@ -288,6 +530,7 @@ class App(ctk.CTk):
         _step(controls, "2", "File the requests").pack(side="left", padx=(0, 16))
         _button(controls, "Open results folder", lambda: self.settings and _open(self.settings.results_dir),
                 width=160).pack(side="right")
+        _button(controls, "Submitted requests", self._open_submissions_log, width=160).pack(side="right", padx=(8, 0))
         self.log_btn = _button(controls, "Activity log", self._toggle_log, width=120)
         self.log_btn.pack(side="right", padx=8)
         self.mode = ctk.CTkSegmentedButton(controls, values=list(MODES), font=(FONT, 13), height=40,
@@ -334,7 +577,11 @@ class App(ctk.CTk):
 
     # ---------- config / person / file ----------
 
-    def _load_config(self) -> None:
+    def _load_config(self, reset_mode: bool = False) -> None:
+        example = BUNDLE_ROOT / "config.example.yaml"
+        if not CONFIG_PATH.exists() and example.exists():  # first start: begin from the example settings
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(example, CONFIG_PATH)
         if not CONFIG_PATH.exists():
             messagebox.showerror("Settings missing", f"{CONFIG_PATH} not found.\nCopy config.example.yaml to "
                                                      "config.yaml and edit it.")
@@ -353,6 +600,27 @@ class App(ctk.CTk):
         if self.profile:
             self.profile_menu.set(self.profile.label)
         self._refresh_profile_info()
+        # Offer only the modes enabled in Settings; keep your current choice unless it is no longer offered
+        offered = [label for label, mode in MODES.items() if mode in self.settings.modes]
+        self.mode.configure(values=offered)
+        if reset_mode or not self._mode_ready or self.mode.get() not in offered:
+            self.mode.set(_mode_label(self.settings.default_mode))
+            self._mode_ready = True
+        self._update_mode_hint()
+        threading.Thread(target=refresh_submissions_log, args=(self.settings.results_dir,), daemon=True).start()
+
+    # Bring the log up to date (it may have missed updates while it was open in Excel), then open it
+    def _open_submissions_log(self) -> None:
+        if not self.settings:
+            return
+        note = refresh_submissions_log(self.settings.results_dir, retries=1)
+        path = submissions_log_path(self.settings.results_dir)
+        if not path.exists():
+            messagebox.showinfo("Submitted requests", "Nothing has been submitted yet.")
+        elif note:
+            messagebox.showinfo("Submitted requests", note[0].upper() + note[1:] + ".")
+        else:
+            _open(path)
 
     def _on_profile(self, label: str) -> None:
         if self.busy or not self.settings:
@@ -375,6 +643,20 @@ class App(ctk.CTk):
         folder = self.settings.attachments_root / (self.profile.folder or "")
         self.info_label.configure(text=f"Only {self.profile.display_name or self.profile.sap_user}'s rows "
                                        f"(Usage dec. made by = {self.profile.sap_user})   ·   Attachments: {folder}")
+
+    def _edit_settings(self) -> None:
+        if self.busy:
+            messagebox.showinfo("Settings", "Settings can be changed when no check or run is in progress.")
+            return
+        if not self.settings:
+            _open(CONFIG_PATH)  # config.yaml has an error the form can't show, so fix it in the file
+            return
+        dialog = SettingsDialog(self, self.settings)
+        self.wait_window(dialog)
+        if dialog.saved:
+            self._load_config(reset_mode=True)
+            self.plan = []
+            self._refresh_table()
 
     def _edit_login(self) -> None:
         if not self.profile or self.busy:
@@ -486,12 +768,16 @@ class App(ctk.CTk):
             except StopRequested:
                 msg = "Stopped."
             except IdentityMismatch as exc:
-                msg = f"Blocked: {exc}"
-                self.call(lambda: messagebox.showerror("Wrong account", str(exc)))
+                msg, reason = f"Blocked: {exc}", str(exc)
+                self.call(lambda: messagebox.showerror("Wrong account", reason))
             except Exception as exc:
                 msg = f"Run aborted: {type(exc).__name__}: {str(exc).splitlines()[0] if str(exc) else ''}"
-                self.call(lambda: self._log(traceback.format_exc()))
+                details = traceback.format_exc()
+                self.call(lambda: self._log(details))
             report = write_report(settings.results_dir, self.plan, f"results_{mode}_{profile.sap_user}")
+            log_note = refresh_submissions_log(settings.results_dir)
+            if log_note:
+                self.call(lambda: self._log(log_note))
             self.call(lambda: self._run_done(msg, report))
 
         threading.Thread(target=work, daemon=True).start()
@@ -560,8 +846,8 @@ class App(ctk.CTk):
     def _open_row_folder(self, _event: object) -> None:
         iid = self.table.focus()
         req = next((r for r in self.plan if str(r.excel_row) == iid), None)
-        if req and req.folder:
-            _open(req.folder)
+        for folder in req.folders if req else []:
+            _open(folder)
 
     # ---------- helpers ----------
 
@@ -569,13 +855,30 @@ class App(ctk.CTk):
     def call(self, fn: Callable[[], None]) -> None:
         self._ui_queue.put(fn)
 
+    # One failing UI update must not stop the rest (the window would freeze with buttons disabled)
     def _drain_queue(self) -> None:
         try:
             while True:
-                self._ui_queue.get_nowait()()
+                fn = self._ui_queue.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    self._ui_error(traceback.format_exc())
         except queue.Empty:
             pass
-        self.after(100, self._drain_queue)
+        finally:
+            self.after(100, self._drain_queue)
+
+    # The app runs without a console, so UI errors go to the activity log and results/app_errors.log
+    def _ui_error(self, details: str) -> None:
+        try:
+            self._log(details)
+            if self.settings:
+                self.settings.results_dir.mkdir(parents=True, exist_ok=True)
+                with (self.settings.results_dir / "app_errors.log").open("a", encoding="utf-8") as f:
+                    f.write(f"--- {datetime.now():%Y-%m-%d %H:%M:%S}\n{details}\n")
+        except Exception:
+            pass
 
     def _set_busy(self, busy: bool, text: str, running: bool = False) -> None:
         self.busy = busy
@@ -653,6 +956,18 @@ def _row_values(r: Request) -> tuple[str, ...]:
 
 
 # Open a file or folder with its Windows default program
+def _mode_label(mode: str) -> str:
+    return next(label for label, m in MODES.items() if m == mode)
+
+
+# Paths inside the project are shown relative (test_data\s_drive), others in full (S:\...)
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def _open(path: Path) -> None:
     try:
         os.startfile(path)  # type: ignore[attr-defined]
@@ -660,5 +975,19 @@ def _open(path: Path) -> None:
         messagebox.showerror("Cannot open", str(exc))
 
 
+# BatchRelease.exe --selftest: check the browser can be driven, write the outcome next to config.yaml
+def _selftest() -> None:
+    from batch_release.portal import browser_selftest
+    try:
+        result = "OK: " + browser_selftest(load_settings(CONFIG_PATH))
+    except Exception:
+        result = "FAILED:\n" + traceback.format_exc()
+    (PROJECT_ROOT / "selftest.txt").write_text(result, encoding="utf-8")
+
+
 if __name__ == "__main__":
-    App().mainloop()
+    import sys
+    if "--selftest" in sys.argv:
+        _selftest()
+    else:
+        App().mainloop()

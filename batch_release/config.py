@@ -1,10 +1,18 @@
 """Loading of config.yaml into a typed settings object."""
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Where config.yaml and results\ live. In the packaged app (BatchRelease.exe) that is Documents\BatchRelease,
+# so replacing the app folder with a newer build keeps your settings and records. BUNDLE_ROOT holds the
+# files shipped with the app (config.example.yaml).
+if getattr(sys, "frozen", False):
+    PROJECT_ROOT = Path.home() / "Documents" / "BatchRelease"
+    BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+else:
+    PROJECT_ROOT = BUNDLE_ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULT_COLUMNS = {
     "batch": "Batch",
@@ -14,7 +22,10 @@ DEFAULT_COLUMNS = {
     "lot_created": "Lot created on",
     "decided_by": "Usage dec. made by",
     "product": "Short text for inspection object",
+    "ud_code": "UD code",
 }
+
+MODES = ("dry-run", "confirm", "auto")
 
 
 @dataclass
@@ -41,6 +52,8 @@ class Settings:
     browser_channel: str = "chrome"
     results_dir: Path = PROJECT_ROOT / "results"
     selectors: dict[str, str] = field(default_factory=dict)
+    modes: tuple[str, ...] = MODES   # modes offered in the app (e.g. only 'auto' once things are stable)
+    default_mode: str = "dry-run"    # mode selected when the app opens; always one of `modes`
 
 
 # Read config.yaml (relative paths resolve against the project root)
@@ -57,7 +70,23 @@ def load_settings(path: Path) -> Settings:
         browser_channel=raw.get("browser_channel", "chrome"),
         results_dir=_resolve(raw.get("results_dir", "results")),
         selectors=raw.get("selectors") or {},
+        **_modes(raw),
     )
+
+
+# 'modes' = the modes offered (in the standard order); 'default_mode' falls back to the first offered one
+def _modes(raw: dict) -> dict:
+    offered = [_mode(m, "modes") for m in (raw.get("modes") or MODES)]
+    modes = tuple(m for m in MODES if m in offered)
+    default = _mode(raw.get("default_mode") or modes[0], "default_mode")
+    return {"modes": modes, "default_mode": default if default in modes else modes[0]}
+
+
+def _mode(value: object, key: str) -> str:
+    mode = str(value).strip().lower()
+    if mode not in MODES:
+        raise ValueError(f"{key}: '{value}' is not a mode — use {', '.join(MODES)}")
+    return mode
 
 
 # Absolute paths stay as-is; relative ones are anchored at the project root

@@ -12,7 +12,7 @@ from playwright.sync_api import BrowserContext, Locator, Page, sync_playwright
 from .config import Settings, UserProfile
 from .credentials import Login
 from .planner import Request
-from .report import append_ledger
+from .report import record_submission
 
 # How each form element is found. Prefix 'label:' / 'text:' (contains) / 'exact:' / 'role:', else CSS/XPath.
 # These are first guesses from the form's Hebrew labels; override them under 'selectors' in config.yaml.
@@ -31,6 +31,47 @@ DEFAULT_SELECTORS = {
     "declaration_checkbox": "mat-checkbox",
     "submit_button": "text:שלח בקשה",
 }
+
+# Watches the page for popups / dialogs the website shows (also ones that close again quickly) and hands
+# their text to Python. Runs in every page the browser opens, so it survives navigation.
+POPUP_WATCH_JS = r"""(() => {
+    if (window.__brPopupWatch) return;
+    window.__brPopupWatch = true;
+    const SEL = '.swal2-popup, .swal-modal, [role=dialog], [role=alertdialog], mat-dialog-container, '
+              + '.mat-mdc-dialog-container, .modal.show .modal-content, mat-snack-bar-container, '
+              + '.mat-mdc-snack-bar-container, .toast, .alert-danger, .ui-messages-error, .p-toast-message';
+    const last = new WeakMap();
+    const visible = e => e.checkVisibility ? e.checkVisibility({opacityProperty: true, visibilityProperty: true})
+                                           : !!(e.offsetWidth || e.offsetHeight);
+    const send = (e, text) => {
+        text = (text || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+        if (!text || last.get(e) === text) return;
+        last.set(e, text);
+        if (window.__brPopup) window.__brPopup(text);
+    };
+    const scan = () => {
+        for (const e of document.querySelectorAll(SEL)) if (visible(e)) send(e, e.innerText);
+        // Any other popup titled 'שגיאה' (error): report its surrounding box
+        const hits = document.evaluate("//*[normalize-space(text())='שגיאה']", document, null,
+                                       XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+        for (let i = 0; i < hits.snapshotLength; i++) {
+            let box = hits.snapshotItem(i);
+            if (!visible(box)) continue;
+            while (box.parentElement && box.parentElement !== document.body
+                   && (box.innerText || '').trim().length < 15) box = box.parentElement;
+            send(box, box.innerText);
+        }
+    };
+    let timer = null;
+    // Observe the document itself, so a replaced <html> (document.write / re-render) is still watched
+    new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(scan, 150); })
+        .observe(document, {childList: true, subtree: true, attributes: true,
+                            attributeFilter: ['class', 'style', 'aria-hidden']});
+})();"""
+
+# Popup text that means something went wrong on the website
+SITE_ERROR_RE = re.compile(r"שגיאה|נכשל|לא ניתן|לא נמצא|תקלה|error|failed", re.IGNORECASE)
+SITE_LOG_NAME = "website_messages.log"
 
 FILLED = "FILLED (not sent)"
 FILED = "FILED"
@@ -66,6 +107,23 @@ class ConsolePrompts:
         return input(f">>> Send request for batch {req.batch} ({req.product})? [y/N] ").strip().lower() in ("y", "yes")
 
 
+# Open the configured browser on the portal and close it again: shows whether this PC lets the app drive it
+def browser_selftest(settings: Settings) -> str:
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(channel=settings.browser_channel, headless=False)
+        try:
+            page = browser.new_page()
+            page.goto(settings.portal_url, timeout=30000)
+            page.wait_for_timeout(1500)
+            return f"{settings.browser_channel} opened and reached {page.url}"
+        finally:
+            browser.close()
+
+
+class SiteError(RuntimeError):
+    """The website showed an error popup while a request was being filled or sent."""
+
+
 class Portal:
     """Owns the browser window; you log in yourself, then it fills one form per request."""
 
@@ -81,6 +139,8 @@ class Portal:
         self._browser = None
         self.context: BrowserContext | None = None
         self.page: Page | None = None
+        self.popups: list[str] = []          # website popups seen since the current request started
+        self._current: Request | None = None
 
     def __enter__(self) -> "Portal":
         self._pw = sync_playwright().start()
@@ -90,7 +150,10 @@ class Portal:
         self._browser = self._pw.chromium.launch(
             channel=self.settings.browser_channel, headless=False, args=["--start-maximized"])
         self.context = self._browser.new_context(locale="he-IL", no_viewport=True)
+        self.context.expose_binding("__brPopup", lambda _source, text: self._on_popup(str(text)))
+        self.context.add_init_script(POPUP_WATCH_JS)
         self.page = self.context.new_page()
+        self.page.on("dialog", self._on_browser_dialog)
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -100,6 +163,33 @@ class Portal:
             self._browser.close()
         if self._pw:
             self._pw.stop()
+
+    # Every website popup is written to results/website_messages.log and kept for the current request
+    def _on_popup(self, text: str) -> None:
+        self.popups.append(text)
+        req = self._current
+        where = f"row {req.excel_row}, batch {req.batch}" if req else "login / between requests"
+        try:
+            self.settings.results_dir.mkdir(parents=True, exist_ok=True)
+            with (self.settings.results_dir / SITE_LOG_NAME).open("a", encoding="utf-8") as f:
+                f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}\t{where}\t{text}\n")
+        except OSError:
+            pass
+
+    # A native browser alert/confirm: log it and close it (accepting could confirm something unintended)
+    def _on_browser_dialog(self, dialog) -> None:  # noqa: ANN001
+        self._on_popup(f"[browser {dialog.type}] {dialog.message}")
+        try:
+            dialog.dismiss()
+        except Exception:
+            pass
+
+    # Stop this request if the website has shown an error popup since it started
+    def _check_site_errors(self, step: str) -> None:
+        self._page().wait_for_timeout(800)  # let a popup triggered by the last action appear
+        errors = [t for t in self.popups if SITE_ERROR_RE.search(t)]
+        if errors:
+            raise SiteError(f"website error {step}: " + " | ".join(dict.fromkeys(errors)))
 
     # Open the portal, pre-fill username + password if saved, and wait until you have entered the 2FA code.
     # Then check the portal greeting names the person this run files for.
@@ -137,13 +227,7 @@ class Portal:
         if not expected:
             raise IdentityMismatch(f"no portal_name set for {self.profile.sap_user} in config.yaml — "
                                    "it is needed to verify who is logged in")
-        greeting = self._page().evaluate("""() => {
-            const hits = [...document.querySelectorAll('body *')]
-                .filter(e => e.children.length <= 3 && /שלום/.test(e.innerText || ''))
-                .map(e => e.innerText.trim());
-            hits.sort((a, b) => a.length - b.length);
-            return hits[0] || '';
-        }""")
+        greeting = pick_greeting(self._page().evaluate(GREETING_TEXTS_JS))
         if _norm_name(expected) not in _norm_name(greeting):
             raise IdentityMismatch(f"logged in as '{greeting or 'unknown'}', but this run is for "
                                    f"{self.profile.label} (expected '{expected}'). Nothing was filed.")
@@ -154,6 +238,8 @@ class Portal:
         if self.profile and req.decided_by != self.profile.sap_user:
             req.status, req.message = FAILED, f"blocked: row belongs to {req.decided_by}, not {self.profile.sap_user}"
             return
+        self.popups.clear()
+        self._current = req
         try:
             page.goto(self.settings.portal_url)
             if not self._open_form(timeout_ms=20000):
@@ -165,9 +251,12 @@ class Portal:
             self._fill(self.selectors["license"], req.license)
             self._locate(self.selectors["show_product_button"]).first.click()
             page.wait_for_load_state("networkidle")
+            self._check_site_errors("after 'הצג תכשיר' (product lookup)")
 
             self._attach_files(req.files)
+            self._check_site_errors("while attaching files")
             self._tick_declaration()
+            self._check_site_errors("before sending")
             shot = self._screenshot(req, "filled")
 
             if mode == "dry-run":
@@ -177,16 +266,29 @@ class Portal:
                 req.status, req.message = DECLINED, f"screenshot: {shot.name}"
                 return
 
+            self.popups.clear()
             self._locate(self.selectors["submit_button"]).first.click()
             reference = self._wait_for_confirmation()
             done = self._screenshot(req, "sent", full_page=False)  # viewport shot keeps the confirmation popup in view
-            append_ledger(self.settings.results_dir, req, excel_name, reference)
+            if not reference and any(SITE_ERROR_RE.search(t) for t in self.popups):
+                raise SiteError("website error after pressing send, and no request number was shown: "
+                                + " | ".join(dict.fromkeys(self.popups))
+                                + " - check in the portal whether the request was received")
             saved = self._save_confirmation_to_folder(req, done, reference)
-            req.status, req.message = FILED, f"reference: {reference or '?'}, {saved}"
+            filed_by = self.profile.label if self.profile else ""
+            log_note = record_submission(self.settings.results_dir, req, excel_name, reference, done, filed_by)
+            req.status = FILED
+            req.message = "; ".join(m for m in (f"reference: {reference or '?'}", saved, log_note) if m)
         except Exception as exc:  # one bad row must not stop the whole batch
             shot = self._screenshot(req, "error")
             first_line = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
-            req.status, req.message = FAILED, f"{type(exc).__name__}: {first_line} (screenshot: {shot.name})"
+            reason = first_line if isinstance(exc, SiteError) else f"{type(exc).__name__}: {first_line}"
+            unseen = [t for t in dict.fromkeys(self.popups) if t not in reason]
+            if unseen:  # e.g. a timeout caused by a popup covering the page
+                reason += " | website said: " + " | ".join(unseen)
+            req.status, req.message = FAILED, f"{reason} (screenshot: {shot.name})"
+        finally:
+            self._current = None
 
     # Dump every input/button on the current page, used to calibrate the selectors
     def inspect_form(self, out_path: Path) -> Path:
@@ -291,15 +393,16 @@ class Portal:
             time.sleep(0.5)
         return ""
 
-    # Copy the confirmation screenshot into the batch's own attachment folder (only after a real send)
+    # Copy the confirmation screenshot into each of the batch's attachment folders (only after a real send)
     def _save_confirmation_to_folder(self, req: Request, shot: Path, reference: str) -> str:
-        if req.folder is None:
+        if not req.folders:
             return f"screenshot: {shot.name}"
         stamp = reference or datetime.now().strftime("%d.%m.%Y %H%M")
-        target = req.folder / f"MOH confirmation {req.batch} {stamp}.png"
+        name = f"MOH confirmation {req.batch} {stamp}.png"
         try:
-            shutil.copy2(shot, target)
-            return f"confirmation saved to batch folder: {target.name}"
+            for folder in req.folders:
+                shutil.copy2(shot, folder / name)
+            return f"confirmation saved to batch folder: {name}"
         except OSError as exc:
             return f"could not save confirmation to batch folder ({exc}); copy is in results: {shot.name}"
 
@@ -315,6 +418,27 @@ class Portal:
 
 
 # Compare names ignoring spaces, commas and case
+# Short texts around every 'שלום' on the page: the element itself and a few levels up, because the
+# greeting is often split, e.g. <span>שלום</span><span>דוד</span>
+GREETING_TEXTS_JS = """() => {
+    const texts = [];
+    for (const e of document.querySelectorAll('body *')) {
+        if (e.children.length > 3 || !/שלום/.test(e.innerText || '')) continue;
+        for (let n = e, up = 0; n && n !== document.body && up < 4; n = n.parentElement, up++) {
+            const t = (n.innerText || '').trim();
+            if (t.length <= 100) texts.push(t);
+        }
+    }
+    return texts;
+}"""
+
+
+# The shortest text that holds 'שלום' plus a name (a bare 'שלום' is not a greeting we can check)
+def pick_greeting(texts: list[str]) -> str:
+    named = [t for t in texts if "שלום" in t and re.sub(r"[\s,.:!\-]+", "", t.replace("שלום", ""))]
+    return min(named, key=len, default="")
+
+
 def _norm_name(text: str) -> str:
     return re.sub(r"[\s,]+", "", text or "").lower()
 

@@ -25,7 +25,8 @@ class Request:
     expiry_date: date | None
     lot_created: date | None
     decided_by: str
-    folder: Path | None = None
+    ud_code: str = ""
+    folders: list[Path] = field(default_factory=list)  # all matching folders, used as one
     files: list[Path] = field(default_factory=list)
     status: str = READY
     message: str = ""
@@ -72,6 +73,7 @@ def build_plan(excel_path: Path, settings: Settings, already_filed: set[str],
             expiry_date=_as_date(row[cols["expiry_date"]]),
             lot_created=_as_date(row[cols["lot_created"]]),
             decided_by=decided_by,
+            ud_code=row[cols["ud_code"]].strip(),
         )
         plan.append(req)
         _validate(req, _index_for(decided_by, settings, indexes), seen, already_filed)
@@ -81,6 +83,9 @@ def build_plan(excel_path: Path, settings: Settings, already_filed: set[str],
 # Fill in license/folder/files and mark the row READY, SKIPPED or NEEDS_ATTENTION
 def _validate(req: Request, index: FolderIndex | str,
               seen: dict[str, int], already_filed: set[str]) -> None:
+    if not req.ud_code:  # no usage decision yet
+        req.status, req.message = SKIPPED, "UD code is empty"
+        return
     try:
         req.license = to_portal_license(req.license_raw)
     except LicenseFormatError as exc:
@@ -101,13 +106,13 @@ def _validate(req: Request, index: FolderIndex | str,
         req.status, req.message = NEEDS_ATTENTION, index
         return
     match = index.find(req.batch, req.lot_created)
-    if match.folder is None:
+    if not match.folders:
         listed = "; ".join(str(c) for c in match.candidates)
         req.status = NEEDS_ATTENTION
         req.message = match.problem + (f" [{listed}]" if listed else "")
         return
-    req.folder = match.folder
-    choice = select_attachments(match.folder, req.batch)
+    req.folders = match.folders
+    choice = select_attachments(match.folders, req.batch)
     req.files, req.attach_rule = choice.files, choice.rule
     if choice.problem:
         req.status, req.message = NEEDS_ATTENTION, choice.problem

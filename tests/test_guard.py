@@ -4,7 +4,7 @@ import pytest
 
 from batch_release.config import UserProfile
 from batch_release.planner import Request
-from batch_release.portal import _norm_name
+from batch_release.portal import _norm_name, pick_greeting
 from batch_release.runner import file_requests
 
 
@@ -23,3 +23,9 @@ def test_runner_refuses_someone_elses_rows() -> None:
 def test_greeting_match_ignores_spacing() -> None:
     assert _norm_name("דוד") in _norm_name("שלום,  דוד")
     assert _norm_name("גיל") not in _norm_name("שלום, דוד")
+
+
+def test_bare_greeting_word_is_not_taken_as_the_name() -> None:
+    # the portal splits it: <span>שלום</span><span>דוד</span> -> the texts around it are collected
+    assert pick_greeting(["שלום", "שלום, ", "שלום דוד", "שלום דוד\nיציאה"]) == "שלום דוד"
+    assert pick_greeting(["שלום"]) == ""

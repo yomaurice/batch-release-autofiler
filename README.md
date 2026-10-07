@@ -22,48 +22,80 @@ per Excel row, attaches that batch's documents and, depending on the mode, sends
 also reads the portal greeting (`שלום, <name>`). If it doesn't match that person's `portal_name` in
 `config.yaml`, the run is blocked before anything is filled.
 
-**Skipped:** blank or totals rows, non-IL licenses, duplicates of an earlier row (same batch + license +
-lot date), and anything already filed in a previous run (`results/filed_ledger.csv`).
+**Skipped:** blank or totals rows, rows with an empty `UD code`, non-IL licenses, duplicates of an earlier row (same batch + license +
+lot date), and anything already submitted in a previous run (see *Submitted requests* below).
 
 **Attachment folder:** searched only inside the user's own folder:
 `attachments_root\<user folder>\`. The folder is mapped from the `Usage dec. made by` value under
 `users` in `config.yaml` (`folder: Dudi`). Folders look like
 `ABITREN TEVA 75MG_3ML 10 AMP 44216 25.05.2026 1802347455 ...`, and the batch must appear in the name
-as a whole word. If several folders match, the one carrying the **Lot created on** date wins. If that
-still isn't unique, the row is marked `NEEDS_ATTENTION` and the candidates are listed.
+as a whole word. If several folders match, they are **combined and treated as one folder**: the rules
+below look at the files of all of them together. Folders whose name carries a *different* date than
+**Lot created on** belong to another lot and are left out. If every matching folder carries a different
+date, the row is marked `NEEDS_ATTENTION` and the candidates are listed.
 
 **Which files are uploaded.** The first rule that applies wins:
 
-1. The folder has a `MOH_SUB` sub-folder → every file inside `MOH_SUB` (nothing outside it).
-2. A file whose name starts with `OK 3rd P replenish` exists → every file containing that phrase, plus the
-   file named **exactly** as the batch (e.g. `44216.pdf`).
-3. A file containing `report-` exists → every file containing `report-`, plus every file containing
-   `COA`, plus the file named **exactly** as the batch.
-4. None of the above → the row is flagged `NEEDS_ATTENTION`. A COA alone is never uploaded.
+1. A `MOH_SUB` sub-folder exists → every file inside `MOH_SUB` (nothing outside it).
+2. A file whose name starts with `OK 3rd P replenish` exists → every file containing that phrase (data
+   logger), plus the **latest** file named exactly as the batch (e.g. `44216.pdf`), which is the COA here.
+3. A file containing `report-` exists → every file containing `report-`, plus the **latest** file containing `COA`.
+4. A file containing `data logger` exists → every file containing `data logger`, plus the **latest** file
+   containing `COA`.
+5. None of the above → the row is flagged `NEEDS_ATTENTION`. A COA alone is never uploaded.
 
-A rule whose batch file (or, for rule 3, COA) is missing is also flagged. Matching ignores case.
+"Latest" means most recently modified. A rule whose COA is missing is also flagged. Matching ignores case.
 
 **After a real send**, the confirmation page (with its request number) is screenshotted into
-`results\screenshots\`, and a copy is saved **into the batch's own folder** as
+`results\screenshots\`, and a copy is saved **into the batch's own folder(s)** as
 `MOH confirmation <batch> <number>.png`. Dry runs never do this.
 
-## Setup (once)
+**Submitted requests log.** Every request sent is added to `results\Submitted requests.xlsx` (newest first):
+time, MOH request number (read from the confirmation page that is screenshotted), batch, product, license,
+dates, who filed it, the SAP export, the files uploaded, the screenshot and the batch folder(s). It is one
+cumulative file across all runs. It is safe to keep it open in Excel: each submission is first recorded in
+`results\submissions.jsonl` (never opened by people, also used to skip already-filed batches), and the Excel
+file is rebuilt from it. If it is open at that moment, an up-to-date `Submitted requests - updated copy.xlsx`
+is written instead, and the main file catches up as soon as it is closed (or when you click **Submitted
+requests** in the app).
+
+## Setup on a PC (once)
+
+Needs **Git**, **Python 3.11+** (with the `py` launcher) and **Google Chrome**.
 
 ```bat
-cd C:\personal_projects\batch_release_autofiler
-py -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
-copy config.example.yaml config.yaml
+cd C:\
+git clone https://github.com/yomaurice/batch-release-autofiler
 ```
 
-Edit `config.yaml`: set `attachments_root`, and under `users` give each SAP user their `folder` and
-`portal_name` (their name exactly as in the portal's `שלום, ...` greeting). The script uses your
-installed Chrome (`browser_channel: chrome`), so `playwright install` isn't needed.
+Then double-click **`start.bat`** in that folder. The first time it creates the Python environment and
+installs the packages (a minute or two), then opens the app. Create a desktop shortcut to `start.bat` if
+you like.
 
-**Login details (optional, once per person).** In the app, choose your name and click **Login details**.
-Your portal username and password are saved encrypted in **Windows Credential Manager**, for your Windows
-account only, never in a file. Each run then fills them on the MOH login page, and you type only the
+In the app, click **⚙ Settings** and fill in:
+- **Attachments root**: the S: folder that holds one sub-folder per person
+  (`S:\Batch ready for release\AA Pending QP Release\AA RELEASED & BEFORE MOH PORTAL`).
+- **People who file**: for each person, their SAP user (as in `Usage dec. made by`), their sub-folder, and
+  their **portal name**, exactly as in the portal's `שלום, ...` greeting.
+- **Run modes**: which modes the app offers, and which one is selected when it opens.
+
+Settings are saved in `config.yaml` (not in git, so each PC keeps its own). **Open config file** in Settings
+shows the file itself. The app uses your installed Chrome, so `playwright install` isn't needed.
+
+**Login details (optional, once per person and PC).** In the app, choose your name and click **Login
+details**. Your portal username and password are saved encrypted in **Windows Credential Manager**, for your
+Windows account only, never in a file. Each run then fills them on the MOH login page, and you type only the
 code from your phone.
+
+### Updating to a new version
+
+```bat
+cd C:\batch-release-autofiler
+git pull
+```
+
+Then start the app with `start.bat` as usual. It installs any new packages by itself. Your `config.yaml`,
+saved logins and `results\` are kept.
 
 ## Monthly use — the app
 
@@ -73,8 +105,9 @@ Double-click **`start.bat`**. The first time, it sets up Python packages, which 
 1. **Browse…** to the month's SAP export. It is checked straight away: every one of your rows is shown,
    colour-coded **Ready** / **Needs attention** / **Skipped**, with the files that will be uploaded and
    the reason for anything not ready. Double-click a row to open its folder.
-2. Pick a **mode**: *Dry run* (fill only, never send), *Ask me before each send*, or *Send all
-   automatically*.
+2. Pick a **mode**: *Dry run* (fill only, never send), *Ask before each send*, or *Send all*. Which modes
+   are offered, and which one is selected at start-up, is set under **Run modes** in Settings (e.g. offer
+   only *Send all* once things are stable).
 3. **Start**. This files every Ready row, or only the rows you selected (Ctrl/Shift-click). Chrome opens.
    Your username and password are filled in if saved. Type the 2FA code, then click **I'm logged in** in
    the yellow banner. In *ask* mode the banner shows
@@ -86,7 +119,7 @@ Every check and run is saved as an Excel file in `results\` (**Open results fold
 
 ```bat
 .venv\Scripts\python run.py plan   "...\05.10.26.XLSX"
-.venv\Scripts\python run.py submit "...\05.10.26.XLSX" --user DSABAG01 --mode dry-run|confirm|auto [--limit 1] [--rows 4 7]
+.venv\Scripts\python run.py submit "...\05.10.26.XLSX" --user DSABAG01 [--mode dry-run|confirm|auto] [--limit 1] [--rows 4 7]
 ```
 
 ## Testing without the real share
@@ -96,7 +129,7 @@ Every check and run is saved as an Excel file in `results\` (**Open results fold
 ```
 
 This creates `test_data\s_drive\<user folder>\<PRODUCT> <batch> <dd.mm.yyyy> <delivery>\` with dummy
-PDFs. The rows cycle through the four attachment cases (MOH_SUB / replenish / report- / nothing), so
+PDFs. The rows cycle through the attachment cases (MOH_SUB / replenish / report- / data logger / nothing), so
 `plan` shows each rule working.
 
 ## Calibrating the form (first run)
@@ -121,3 +154,9 @@ the right selectors under `selectors:` in `config.yaml` (see the comments there)
   Each generated test tree logs its folders in `test_data\<root>\_test_tree_manifest.csv`.
 - To switch from testing to the real share, change `attachments_root` in `config.yaml`. Nothing else changes.
 - A failed row is screenshotted and the run carries on. Check the `results_*.xlsx` workbook at the end.
+- **Website popups.** Every popup or message box the portal shows during a run (also ones that close again
+  by themselves) is written to `results\website_messages.log`, with the time, row and batch. An error popup
+  (`שגיאה`, ...) stops that request: it is marked **Failed** with the website's own message, and the run
+  moves on to the next one. Such errors can be the portal's fault, but they are always recorded.
+- `results\` is per PC: the *Submitted requests* log and the "already filed" check only know about
+  requests sent from that PC.
